@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 150">
+  <defs>
+    <linearGradient id="ephorGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0055FF" />
+      <stop offset="100%" stop-color="#00E5FF" />
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(30, 30)">
+    <path d="M 60 10 A 40 40 0 1 0 88 78" fill="none" stroke="url(#ephorGrad)" stroke-width="16" stroke-linecap="square"/>
+    <circle cx="45" cy="45" r="14" fill="#FFFFFF" />
+    <line x1="85" y1="5" x2="5" y2="85" stroke="#0F172A" stroke-width="8" stroke-linecap="square"/>
+  </g>
+
+  <text x="140" y="92" font-family="system-ui, -apple-system, sans-serif" font-size="52" font-weight="900" fill="#FFFFFF" letter-spacing="-1.5">EPHOR</text>
+  <text x="325" y="92" font-family="system-ui, -apple-system, sans-serif" font-size="52" font-weight="300" fill="#64748B" letter-spacing="-1">PROTOCOL</text>
+</svg>

@@ -1,0 +1,42 @@
+# Foundry compiler output
+cache/
+out/
+
+# Broadcast logs
+broadcast/
+
+# Claude Code session data
+.claude/
+
+# Docs
+docs/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies & build output
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+frontend/.netlify/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Foundry lock (generated, not needed in VCS)
+foundry.lock
+
+# Analysis / audit scratch files
+explanation.md
+store.md
+SECURITY_AUDIT_REPORT.md
+vulnerability_summary.md
