@@ -41,22 +41,21 @@ import "./Interface/ISomnia.sol";
  */
 
 interface IVault {
-    function totalAssets()                       external view returns (uint256);
-    function idleBufferPct()                     external view returns (uint256);
+    function totalAssets() external view returns (uint256);
+    function idleBufferPct() external view returns (uint256);
     function marketAllocationPct(address market) external view returns (uint256);
-    function marketCount()                       external view returns (uint256);
-    function marketList(uint256 i)               external view returns (address);
-    function pauseDeposits()                     external;
+    function marketCount() external view returns (uint256);
+    function marketList(uint256 i) external view returns (address);
+    function pauseDeposits() external;
     function emergencyDeallocate(address market, uint256 amount) external;
 }
 
 interface IMarket {
     function balanceOf(address account) external view returns (uint256);
-    function utilizationBps()           external view returns (uint256);
+    function utilizationBps() external view returns (uint256);
 }
 
 contract VaultSentinel {
-
     // ── Somnia platform ──────────────────────────────────────────────────────
     // Testnet:  0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776
     // Mainnet:  0x5E5205CF39E766118C01636bED000A54D93163E6
@@ -66,35 +65,39 @@ contract VaultSentinel {
     uint256 public llmAgentId;
 
     // Default subcommittee size (matches platform default)
-    uint256 public constant SUBCOMMITTEE_SIZE    = 3;
+    uint256 public constant SUBCOMMITTEE_SIZE = 3;
     // Per-agent cost for LLM inference (from Somnia Gas Fees docs: 0.07 SOMI)
-    uint256 public constant LLM_COST_PER_AGENT   = 0.07 ether;
+    uint256 public constant LLM_COST_PER_AGENT = 0.07 ether;
 
     // ── Admin ────────────────────────────────────────────────────────────────
     address public admin;
 
     // ── Risk levels ──────────────────────────────────────────────────────────
-    enum RiskLevel { Safe, Caution, Critical }
+    enum RiskLevel {
+        Safe,
+        Caution,
+        Critical
+    }
 
     // ── Per-vault registry ───────────────────────────────────────────────────
     struct VaultInfo {
-        bool      registered;
-        bool      autoPauseEnabled;
+        bool registered;
+        bool autoPauseEnabled;
         RiskLevel lastLevel;
-        uint256   lastCheckedAt;
-        uint256   totalChecks;
-        uint256   criticalCount;
+        uint256 lastCheckedAt;
+        uint256 totalChecks;
+        uint256 criticalCount;
     }
     mapping(address => VaultInfo) public vaultInfo;
     address[] private _vaultList;
 
     // ── Immutable audit trail ────────────────────────────────────────────────
     struct RiskSnapshot {
-        uint256   timestamp;
+        uint256 timestamp;
         RiskLevel level;
-        string    rawVerdict;
-        uint256   totalAssets;
-        uint256   idlePct;
+        string rawVerdict;
+        uint256 totalAssets;
+        uint256 idlePct;
     }
     mapping(address => RiskSnapshot[]) private _history;
 
@@ -102,7 +105,7 @@ contract VaultSentinel {
     // IMPORTANT: must use pendingRequests (not _pending) so MockPlatform can
     // look up the vault from the requestId in tests
     mapping(uint256 => address) public pendingRequests; // requestId → vault
-    mapping(address => uint256) public activeRequest;   // vault → requestId (0=none)
+    mapping(address => uint256) public activeRequest; // vault → requestId (0=none)
 
     uint256 public constant CHECK_COOLDOWN = 5 minutes;
 
@@ -128,9 +131,9 @@ contract VaultSentinel {
 
     constructor(address _platform, uint256 _llmAgentId, address _admin) {
         require(_platform != address(0) && _admin != address(0), "zero addr");
-        platform   = IAgentRequester(_platform);
+        platform = IAgentRequester(_platform);
         llmAgentId = _llmAgentId;
-        admin      = _admin;
+        admin = _admin;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -150,13 +153,10 @@ contract VaultSentinel {
      */
     function checkVault(address vault) external payable {
         VaultInfo storage info = vaultInfo[vault];
-        require(info.registered,                                        "not registered");
+        require(info.registered, "not registered");
         require(block.timestamp >= info.lastCheckedAt + CHECK_COOLDOWN, "cooldown");
-        require(activeRequest[vault] == 0,                              "check in progress");
-        require(
-            msg.value >= LLM_COST_PER_AGENT * SUBCOMMITTEE_SIZE,
-            "insufficient deposit"
-        );
+        require(activeRequest[vault] == 0, "check in progress");
+        require(msg.value >= LLM_COST_PER_AGENT * SUBCOMMITTEE_SIZE, "insufficient deposit");
 
         // ── Read all metrics from vault's own contracts (zero external API) ──
         (
@@ -169,9 +169,7 @@ contract VaultSentinel {
         ) = _readMetrics(vault);
 
         // ── Build user prompt ──────────────────────────────────────────────
-        string memory userPrompt = _buildUserPrompt(
-            totalA, idlePct, mCount, mAddrs, mAllocPct, mUtilBps
-        );
+        string memory userPrompt = _buildUserPrompt(totalA, idlePct, mCount, mAddrs, mAllocPct, mUtilBps);
 
         // ── Encode LLM agent call ──────────────────────────────────────────
         // inferString(prompt, system, chainOfThought, allowedValues)
@@ -182,23 +180,23 @@ contract VaultSentinel {
         allowed[2] = "CRITICAL";
         bytes memory payload = abi.encodeWithSelector(
             ILLMInferenceAgent.inferString.selector,
-            userPrompt,      // prompt  — vault metrics
+            userPrompt, // prompt  — vault metrics
             _systemPrompt(), // system  — classification instructions
-            false,           // chainOfThought — off, we want a single word
-            allowed          // allowedValues  — constrain output
+            false, // chainOfThought — off, we want a single word
+            allowed // allowedValues  — constrain output
         );
 
         // ── Send to Somnia platform ────────────────────────────────────────
         uint256 reqId = platform.createRequest{value: msg.value}(
             llmAgentId,
             address(this),
-            this.handleResponse.selector,   // ← exact name from real docs
+            this.handleResponse.selector, // ← exact name from real docs
             payload
         );
 
-        pendingRequests[reqId]    = vault;
-        activeRequest[vault]      = reqId;
-        info.lastCheckedAt        = block.timestamp;
+        pendingRequests[reqId] = vault;
+        activeRequest[vault] = reqId;
+        info.lastCheckedAt = block.timestamp;
         info.totalChecks++;
 
         emit CheckRequested(vault, reqId, msg.sender);
@@ -213,11 +211,14 @@ contract VaultSentinel {
     // ════════════════════════════════════════════════════════════════════════
 
     function handleResponse(
-        uint256           requestId,
+        uint256 requestId,
         Response[] memory responses,
-        ResponseStatus    status,
-        Request    memory /* details */
-    ) external onlyPlatform {
+        ResponseStatus status,
+        Request memory /* details */
+    )
+        external
+        onlyPlatform
+    {
         address vault = pendingRequests[requestId];
         require(vault != address(0), "unknown request");
 
@@ -227,11 +228,7 @@ contract VaultSentinel {
         VaultInfo storage info = vaultInfo[vault];
 
         // ── Fail-safe: timeout/failure → CAUTION (never silently SAFE) ──────
-        if (
-            status == ResponseStatus.TimedOut ||
-            status == ResponseStatus.Failed   ||
-            responses.length == 0
-        ) {
+        if (status == ResponseStatus.TimedOut || status == ResponseStatus.Failed || responses.length == 0) {
             _store(vault, RiskLevel.Caution, "AI_UNAVAILABLE");
             info.lastLevel = RiskLevel.Caution;
             emit RiskAlert(vault, RiskLevel.Caution, "AI_UNAVAILABLE");
@@ -239,8 +236,8 @@ contract VaultSentinel {
         }
 
         // ── Decode the single-word LLM response ───────────────────────────
-        string memory raw   = abi.decode(responses[0].result, (string));
-        RiskLevel     level = _parse(raw);
+        string memory raw = abi.decode(responses[0].result, (string));
+        RiskLevel level = _parse(raw);
 
         _store(vault, level, raw);
         info.lastLevel = level;
@@ -268,18 +265,23 @@ contract VaultSentinel {
     }
 
     function _deallocateWorstMarket(address vault) internal {
-        IVault  v    = IVault(vault);
-        uint256 cnt  = v.marketCount();
+        IVault v = IVault(vault);
+        uint256 cnt = v.marketCount();
         if (cnt == 0) return;
 
-        address worst     = address(0);
+        address worst = address(0);
         uint256 worstUtil = 0;
 
         for (uint256 i; i < cnt;) {
-            address m  = v.marketList(i);
-            uint256 u  = IMarket(m).utilizationBps();
-            if (u > worstUtil) { worstUtil = u; worst = m; }
-            unchecked { ++i; }
+            address m = v.marketList(i);
+            uint256 u = IMarket(m).utilizationBps();
+            if (u > worstUtil) {
+                worstUtil = u;
+                worst = m;
+            }
+            unchecked {
+                ++i;
+            }
         }
         // Only pull if util > 90%  (9000 bps)
         if (worst == address(0) || worstUtil < 9_000) return;
@@ -298,27 +300,33 @@ contract VaultSentinel {
     //  INTERNAL — READ METRICS (pure on-chain)
     // ════════════════════════════════════════════════════════════════════════
 
-    function _readMetrics(address vault) internal view returns (
-        uint256 totalA,
-        uint256 idlePct,
-        uint256 mCount,
-        address[] memory mAddrs,
-        uint256[] memory mAllocPct,
-        uint256[] memory mUtilBps
-    ) {
-        IVault v  = IVault(vault);
-        totalA    = v.totalAssets();
-        idlePct   = v.idleBufferPct();
-        mCount    = v.marketCount();
-        mAddrs    = new address[](mCount);
+    function _readMetrics(address vault)
+        internal
+        view
+        returns (
+            uint256 totalA,
+            uint256 idlePct,
+            uint256 mCount,
+            address[] memory mAddrs,
+            uint256[] memory mAllocPct,
+            uint256[] memory mUtilBps
+        )
+    {
+        IVault v = IVault(vault);
+        totalA = v.totalAssets();
+        idlePct = v.idleBufferPct();
+        mCount = v.marketCount();
+        mAddrs = new address[](mCount);
         mAllocPct = new uint256[](mCount);
-        mUtilBps  = new uint256[](mCount);
+        mUtilBps = new uint256[](mCount);
         for (uint256 i; i < mCount;) {
-            address m     = v.marketList(i);
-            mAddrs[i]     = m;
-            mAllocPct[i]  = v.marketAllocationPct(m);
-            mUtilBps[i]   = IMarket(m).utilizationBps();
-            unchecked { ++i; }
+            address m = v.marketList(i);
+            mAddrs[i] = m;
+            mAllocPct[i] = v.marketAllocationPct(m);
+            mUtilBps[i] = IMarket(m).utilizationBps();
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -327,17 +335,12 @@ contract VaultSentinel {
     // ════════════════════════════════════════════════════════════════════════
 
     function _systemPrompt() internal pure returns (string memory) {
-        return
-            "You are a DeFi vault risk classifier. "
-            "Respond with EXACTLY ONE WORD: SAFE, CAUTION, or CRITICAL. "
+        return "You are a DeFi vault risk classifier. " "Respond with EXACTLY ONE WORD: SAFE, CAUTION, or CRITICAL. "
             "No punctuation. No explanation. No newline. One word only. "
-            "CRITICAL if ANY: (1) any market allocation >40%; "
-            "(2) idle buffer <5%; (3) any market utilization >95%. "
+            "CRITICAL if ANY: (1) any market allocation >40%; " "(2) idle buffer <5%; (3) any market utilization >95%. "
             "CAUTION if ANY: (1) any market allocation 25-40%; "
-            "(2) idle buffer 5-10%; (3) any market utilization 80-95%. "
-            "SAFE if none of the above. "
-            "If data missing or inconsistent: CAUTION. "
-            "RESPOND WITH ONE WORD ONLY: SAFE, CAUTION, or CRITICAL.";
+            "(2) idle buffer 5-10%; (3) any market utilization 80-95%. " "SAFE if none of the above. "
+            "If data missing or inconsistent: CAUTION. " "RESPOND WITH ONE WORD ONLY: SAFE, CAUTION, or CRITICAL.";
     }
 
     function _buildUserPrompt(
@@ -348,36 +351,46 @@ contract VaultSentinel {
         uint256[] memory mAllocPct,
         uint256[] memory mUtilBps
     ) internal pure returns (string memory s) {
-        s = string(abi.encodePacked(
-            "Vault: total=", _u(totalA / 1_000_000), " USDC ",
-            "idle=", _u(idlePct), "%. "
-        ));
+        s = string(abi.encodePacked("Vault: total=", _u(totalA / 1_000_000), " USDC ", "idle=", _u(idlePct), "%. "));
         for (uint256 i; i < mCount;) {
-            s = string(abi.encodePacked(
-                s, "Market", _u(i + 1), ": ",
-                "alloc=",  _u(mAllocPct[i]),         "% ",
-                "util=",   _u(mUtilBps[i] / 100),    "%. "
-            ));
-            unchecked { ++i; }
+            s = string(
+                abi.encodePacked(
+                    s,
+                    "Market",
+                    _u(i + 1),
+                    ": ",
+                    "alloc=",
+                    _u(mAllocPct[i]),
+                    "% ",
+                    "util=",
+                    _u(mUtilBps[i] / 100),
+                    "%. "
+                )
+            );
+            unchecked {
+                ++i;
+            }
         }
     }
 
     function _parse(string memory raw) internal pure returns (RiskLevel) {
         bytes32 h = keccak256(bytes(raw));
         if (h == keccak256(bytes("CRITICAL"))) return RiskLevel.Critical;
-        if (h == keccak256(bytes("CAUTION")))  return RiskLevel.Caution;
-        if (h == keccak256(bytes("SAFE")))     return RiskLevel.Safe;
+        if (h == keccak256(bytes("CAUTION"))) return RiskLevel.Caution;
+        if (h == keccak256(bytes("SAFE"))) return RiskLevel.Safe;
         return RiskLevel.Caution; // unknown → fail-safe
     }
 
     function _store(address vault, RiskLevel level, string memory verdict) internal {
-        _history[vault].push(RiskSnapshot({
-            timestamp:  block.timestamp,
-            level:      level,
-            rawVerdict: verdict,
-            totalAssets: IVault(vault).totalAssets(),
-            idlePct:     IVault(vault).idleBufferPct()
-        }));
+        _history[vault].push(
+            RiskSnapshot({
+                timestamp: block.timestamp,
+                level: level,
+                rawVerdict: verdict,
+                totalAssets: IVault(vault).totalAssets(),
+                idlePct: IVault(vault).idleBufferPct()
+            })
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -385,19 +398,22 @@ contract VaultSentinel {
     // ════════════════════════════════════════════════════════════════════════
 
     function registerVault(address vault, bool autoPause) external onlyAdmin {
-        require(vault != address(0),           "zero vault");
-        require(!vaultInfo[vault].registered,  "already registered");
+        require(vault != address(0), "zero vault");
+        require(!vaultInfo[vault].registered, "already registered");
         vaultInfo[vault] = VaultInfo(true, autoPause, RiskLevel.Safe, 0, 0, 0);
         _vaultList.push(vault);
         emit VaultRegistered(vault, autoPause);
     }
 
     function setLlmAgentId(uint256 newId) external onlyAdmin {
-        llmAgentId = newId; emit AgentIdSet(newId);
+        llmAgentId = newId;
+        emit AgentIdSet(newId);
     }
 
     function transferAdmin(address newAdmin) external onlyAdmin {
-        require(newAdmin != address(0), "zero"); admin = newAdmin; emit AdminTransferred(newAdmin);
+        require(newAdmin != address(0), "zero");
+        admin = newAdmin;
+        emit AdminTransferred(newAdmin);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -408,17 +424,20 @@ contract VaultSentinel {
         return _history[vault];
     }
 
-    function getLatestRisk(address vault)
-        external view returns (RiskLevel level, uint256 ts, string memory verdict)
-    {
+    function getLatestRisk(address vault) external view returns (RiskLevel level, uint256 ts, string memory verdict) {
         RiskSnapshot[] storage h = _history[vault];
         if (h.length == 0) return (RiskLevel.Safe, 0, "NOT_CHECKED");
         RiskSnapshot storage latest = h[h.length - 1];
         return (latest.level, latest.timestamp, latest.rawVerdict);
     }
 
-    function getVaultList() external view returns (address[] memory) { return _vaultList; }
-    function isCheckPending(address vault) external view returns (bool) { return activeRequest[vault] != 0; }
+    function getVaultList() external view returns (address[] memory) {
+        return _vaultList;
+    }
+
+    function isCheckPending(address vault) external view returns (bool) {
+        return activeRequest[vault] != 0;
+    }
 
     // ════════════════════════════════════════════════════════════════════════
     //  HELPERS
@@ -426,10 +445,17 @@ contract VaultSentinel {
 
     function _u(uint256 v) internal pure returns (string memory) {
         if (v == 0) return "0";
-        uint256 t = v; uint256 d;
-        while (t != 0) { d++; t /= 10; }
+        uint256 t = v;
+        uint256 d;
+        while (t != 0) {
+            d++;
+            t /= 10;
+        }
         bytes memory b = new bytes(d);
-        while (v != 0) { d--; b[d] = bytes1(uint8(48 + v % 10)); v /= 10; }
+        while (v != 0) {
+            b[--d] = bytes1(uint8(48 + v % 10));
+            v /= 10;
+        }
         return string(b);
     }
 

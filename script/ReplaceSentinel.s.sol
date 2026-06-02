@@ -25,16 +25,15 @@ import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
 
 contract ReplaceSentinel is Script {
-
     address constant PLATFORM = 0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776;
 
     bytes32 constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
 
     function run() external {
-        uint256 deployerKey     = vm.envUint("PRIVATE_KEY");
-        address deployer        = vm.envAddress("DEPLOYER_ADDRESS");
-        uint256 llmAgentId      = vm.envUint("LLM_AGENT_ID");
-        address vaultAddr       = vm.envAddress("CURATED_VAULT_ADDRESS");
+        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.envAddress("DEPLOYER_ADDRESS");
+        uint256 llmAgentId = vm.envUint("LLM_AGENT_ID");
+        address vaultAddr = vm.envAddress("CURATED_VAULT_ADDRESS");
         address oldSentinelAddr = vm.envAddress("VAULT_SENTINEL_ADDRESS");
 
         CuratedVault vault = CuratedVault(vaultAddr);
@@ -42,11 +41,7 @@ contract ReplaceSentinel is Script {
         vm.startBroadcast(deployerKey);
 
         // 1. Deploy new sentinel
-        VaultSentinel newSentinel = new VaultSentinel(
-            PLATFORM,
-            llmAgentId,
-            deployer
-        );
+        VaultSentinel newSentinel = new VaultSentinel(PLATFORM, llmAgentId, deployer);
         console.log("New VaultSentinel:  ", address(newSentinel));
 
         // 2. Grant SENTINEL_ROLE to new sentinel

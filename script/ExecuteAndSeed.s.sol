@@ -28,18 +28,17 @@ import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
 
 contract ExecuteAndSeed is Script {
-
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
-        address deployer    = vm.envAddress("DEPLOYER_ADDRESS");
+        address deployer = vm.envAddress("DEPLOYER_ADDRESS");
 
-        address usdcAddr     = vm.envAddress("MOCK_USDC_ADDRESS");
-        address vaultAddr    = vm.envAddress("CURATED_VAULT_ADDRESS");
-        address marketAAddr  = vm.envAddress("MARKET_A_ADDRESS");
-        address marketBAddr  = vm.envAddress("MARKET_B_ADDRESS");
+        address usdcAddr = vm.envAddress("MOCK_USDC_ADDRESS");
+        address vaultAddr = vm.envAddress("CURATED_VAULT_ADDRESS");
+        address marketAAddr = vm.envAddress("MARKET_A_ADDRESS");
+        address marketBAddr = vm.envAddress("MARKET_B_ADDRESS");
 
-        MockUSDC          usdc    = MockUSDC(usdcAddr);
-        CuratedVault      vault   = CuratedVault(vaultAddr);
+        MockUSDC usdc = MockUSDC(usdcAddr);
+        CuratedVault vault = CuratedVault(vaultAddr);
         MockLendingMarket marketA = MockLendingMarket(marketAAddr);
         MockLendingMarket marketB = MockLendingMarket(marketBAddr);
 
@@ -51,7 +50,7 @@ contract ExecuteAndSeed is Script {
         console.log("Markets added to vault");
 
         // ── 2. Mint test USDC to deployer ──────────────────────────────────────
-        usdc.mint(deployer, 100_000 * 1e6);   // 100k USDC (6 decimals)
+        usdc.mint(deployer, 100_000 * 1e6); // 100k USDC (6 decimals)
         console.log("Minted 100,000 USDC to deployer");
 
         // ── 3. Deposit into vault ──────────────────────────────────────────────
@@ -78,12 +77,12 @@ contract ExecuteAndSeed is Script {
         vm.stopBroadcast();
 
         // ── Verify expected state ──────────────────────────────────────────────
-        uint256 totalAssets   = vault.totalAssets();
-        uint256 idlePct       = vault.idleBufferPct();
-        uint256 mktAPct       = vault.marketAllocationPct(address(marketA));
-        uint256 mktBPct       = vault.marketAllocationPct(address(marketB));
-        uint256 mktAUtil      = marketA.utilizationBps();
-        uint256 mktBUtil      = marketB.utilizationBps();
+        uint256 totalAssets = vault.totalAssets();
+        uint256 idlePct = vault.idleBufferPct();
+        uint256 mktAPct = vault.marketAllocationPct(address(marketA));
+        uint256 mktBPct = vault.marketAllocationPct(address(marketB));
+        uint256 mktAUtil = marketA.utilizationBps();
+        uint256 mktBUtil = marketB.utilizationBps();
 
         console.log("\n========= VAULT STATE =========");
         console.log("totalAssets (USDC units):  ", totalAssets / 1e6);

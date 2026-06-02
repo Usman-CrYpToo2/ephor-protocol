@@ -31,25 +31,23 @@ import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
 
 contract TriggerCheck is Script {
-
     // 0.07 STT per agent * 3 validators = 0.21 STT reward pot + buffer
     uint256 constant DEPOSIT = 0.25 ether;
 
     function run() external {
-        uint256 deployerKey  = vm.envUint("PRIVATE_KEY");
-        address vaultAddr    = vm.envAddress("CURATED_VAULT_ADDRESS");
+        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        address vaultAddr = vm.envAddress("CURATED_VAULT_ADDRESS");
         address sentinelAddr = vm.envAddress("VAULT_SENTINEL_ADDRESS");
 
         VaultSentinel sentinel = VaultSentinel(payable(sentinelAddr));
-        CuratedVault  vault    = CuratedVault(vaultAddr);
+        CuratedVault vault = CuratedVault(vaultAddr);
 
         // ── Pre-flight checks ──────────────────────────────────────────────────
-        (bool registered, bool autoPause,,,
-         uint256 totalChecks,) = sentinel.vaultInfo(vaultAddr);
+        (bool registered, bool autoPause,,, uint256 totalChecks,) = sentinel.vaultInfo(vaultAddr);
 
-        require(registered,                              "vault not registered in sentinel");
-        require(!sentinel.isCheckPending(vaultAddr),     "check already in progress");
-        require(DEPOSIT >= 0.21 ether,                   "deposit too low");
+        require(registered, "vault not registered in sentinel");
+        require(!sentinel.isCheckPending(vaultAddr), "check already in progress");
+        require(DEPOSIT >= 0.21 ether, "deposit too low");
 
         console.log("\n========= PRE-FLIGHT =========");
         console.log("Vault:              ", vaultAddr);
@@ -78,4 +76,3 @@ contract TriggerCheck is Script {
     }
 }
 
- 

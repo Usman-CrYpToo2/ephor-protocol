@@ -5,6 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+# Install dependencies
+forge install
+
 # Build
 forge build
 
@@ -26,11 +29,41 @@ forge snapshot
 # Local node
 anvil
 
-# Deploy (replace placeholders)
-forge script script/<Script>.s.sol --rpc-url somnia_testnet --private-key <key>
+# Frontend dev server
+cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
-`foundry.toml` configures Solidity 0.8.20, EVM `paris`, optimizer 200 runs, and fuzz with 256 runs. RPC endpoints `somnia_testnet` and `somnia_mainnet` are pre-configured.
+`foundry.toml` configures Solidity 0.8.20, EVM `paris`, optimizer 200 runs, and fuzz with 256 runs. RPC endpoints `somnia_testnet` and `somnia_mainnet` are pre-configured via `${SOMNIA_TESTNET_RPC}` env var.
+
+## Deployment (3-step process)
+
+Copy `.env.example` → `.env`, populate `PRIVATE_KEY`, `DEPLOYER_ADDRESS`, `SOMNIA_TESTNET_RPC`, and `LLM_AGENT_ID` (from `agents.testnet.somnia.network`).
+
+> **Gas note:** Somnia gas costs run ~27× higher than standard EVM estimates. Always pass `--gas-estimate-multiplier 3000` to `forge script`.
+
+```bash
+source .env
+
+# Step 1 — Deploy all contracts, submit timelocked market additions
+forge script script/DeployAndSubmit.s.sol \
+  --rpc-url somnia_testnet --private-key $PRIVATE_KEY \
+  --broadcast --gas-estimate-multiplier 3000
+# Copy printed addresses back into .env
+
+# Step 2 — Execute timelock + seed allocations (run ≥1 min after Step 1)
+forge script script/ExecuteAndSeed.s.sol \
+  --rpc-url somnia_testnet --private-key $PRIVATE_KEY \
+  --broadcast --gas-estimate-multiplier 3000
+
+# Step 3 — Trigger AI risk check (forge script simulation fails on Somnia — use cast send)
+cast send $VAULT_SENTINEL_ADDRESS \
+  "checkVault(address)" $CURATED_VAULT_ADDRESS \
+  --value 0.25ether \
+  --rpc-url $SOMNIA_TESTNET_RPC \
+  --private-key $PRIVATE_KEY
+```
+
+Other scripts: `ReplaceSentinel.s.sol` upgrades the sentinel without redeploying the vault; `VerifyResponse.s.sol` reads back the latest on-chain AI verdict.
 
 ## Architecture
 
@@ -47,12 +80,20 @@ This is an AI-powered DeFi vault system targeting the **Somnia network**, where 
 
 ### AI Risk Check Flow
 
-1. Anyone calls `VaultSentinel.checkVault(vault)` with ≥0.15 STT attached (covers platform deposit + 3 validator rewards at 0.03 STT each).
+1. Anyone calls `VaultSentinel.checkVault(vault)` with ≥0.25 STT attached (covers platform deposit + 3 validator rewards at 0.03 STT each).
 2. Sentinel reads five on-chain metrics from the vault (no external APIs): `totalAssets`, `idleBufferPct`, `marketAllocationPct`, `marketCount`, `utilizationBps` per market.
-3. These metrics are encoded into a plain-English prompt and sent to Somnia's LLM Inference Agent via `platform.createRequest()`.
+3. These metrics are encoded into a plain-English prompt and sent to Somnia's LLM Inference Agent (Qwen3-30B) via `platform.createRequest()`.
 4. Validators run the LLM deterministically (fixed seed, temp=0) and reach consensus.
 5. Platform calls back `VaultSentinel.handleResponse()` with `SAFE`, `CAUTION`, or `CRITICAL`.
 6. `CRITICAL` → `pauseDeposits()` + `emergencyDeallocate()` on the highest-utilization market (50% withdrawal, only if util > 90%). Timeout/failure → fail-safe CAUTION, never silently SAFE.
+
+### Verdict Thresholds
+
+| Condition | Verdict |
+|---|---|
+| Utilization < 80% and allocation < 25% on all markets | **SAFE** |
+| Utilization 80–95% or allocation 25–40% on any market | **CAUTION** |
+| Utilization > 95% **and** allocation > 40% on any market | **CRITICAL** |
 
 ### CuratedVault Role Hierarchy
 

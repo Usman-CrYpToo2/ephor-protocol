@@ -32,33 +32,32 @@ import {Test} from "forge-std/Test.sol";
  */
 
 contract VaultSentinelTest is Test {
-
     // ── Contracts ──────────────────────────────────────────────────────────
-    MockUSDC            usdc;
-    CuratedVault        vault;
-    MockLendingMarket   marketA;
-    MockLendingMarket   marketB;
-    VaultSentinel       sentinel;
-    MockSomniaPlatform  platform;
+    MockUSDC usdc;
+    CuratedVault vault;
+    MockLendingMarket marketA;
+    MockLendingMarket marketB;
+    VaultSentinel sentinel;
+    MockSomniaPlatform platform;
 
     // ── Actors ─────────────────────────────────────────────────────────────
-    address admin     = address(0x1111);   // DEFAULT_ADMIN_ROLE on vault + sentinel admin
-    address curator   = address(0x2222);   // CURATOR_ROLE on vault
-    address allocator = address(0x3333);   // ALLOCATOR_ROLE on vault
-    address user1     = address(0x4444);
-    address user2     = address(0x5555);
-    address attacker  = address(0x6666);
+    address admin = address(0x1111); // DEFAULT_ADMIN_ROLE on vault + sentinel admin
+    address curator = address(0x2222); // CURATOR_ROLE on vault
+    address allocator = address(0x3333); // ALLOCATOR_ROLE on vault
+    address user1 = address(0x4444);
+    address user2 = address(0x5555);
+    address attacker = address(0x6666);
 
     // ── Role constants ─────────────────────────────────────────────────────
-    bytes32 constant CURATOR_ROLE   = keccak256("CURATOR_ROLE");
+    bytes32 constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
     bytes32 constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
-    bytes32 constant SENTINEL_ROLE  = keccak256("SENTINEL_ROLE");
-    bytes32 constant ADMIN_ROLE     = bytes32(0);
+    bytes32 constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
+    bytes32 constant ADMIN_ROLE = bytes32(0);
 
     // ── Sentinel constants mirrored for tests ──────────────────────────────
-    uint256 constant CHECK_COOLDOWN     = 5 minutes;
+    uint256 constant CHECK_COOLDOWN = 5 minutes;
     uint256 constant LLM_COST_PER_AGENT = 0.07 ether;
-    uint256 constant SUBCOMMITTEE_SIZE  = 3;
+    uint256 constant SUBCOMMITTEE_SIZE = 3;
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -95,7 +94,7 @@ contract VaultSentinelTest is Test {
             admin,
             curator,
             allocator,
-            address(this)   // feeRecipient = test contract
+            address(this) // feeRecipient = test contract
         );
 
         // 3. Mock Somnia platform
@@ -125,7 +124,7 @@ contract VaultSentinelTest is Test {
 
         // 8. Register vault in sentinel (sentinel admin = 0x1111)
         vm.prank(admin);
-        sentinel.registerVault(address(vault), true);  // autoPause enabled
+        sentinel.registerVault(address(vault), true); // autoPause enabled
 
         // 9. Fund users
         usdc.mint(user1, 10_000 * 1e6);
@@ -179,7 +178,7 @@ contract VaultSentinelTest is Test {
     function testVault_redeemReturnsUSDC() public {
         usdc.approve(address(vault), 1_000 * 1e6);
         uint256 shares = vault.deposit(1_000 * 1e6, address(this));
-        uint256 before  = usdc.balanceOf(address(this));
+        uint256 before = usdc.balanceOf(address(this));
         vault.redeem(shares, address(this), address(this));
         assertGt(usdc.balanceOf(address(this)), before);
     }
@@ -255,7 +254,7 @@ contract VaultSentinelTest is Test {
 
         vm.prank(allocator);
         vm.expectRevert();
-        vault.allocate(address(marketA), 60_000 * 1e6);  // cap is 50k
+        vault.allocate(address(marketA), 60_000 * 1e6); // cap is 50k
     }
 
     function testVault_deallocateReturnsToVault() public {
@@ -382,9 +381,9 @@ contract VaultSentinelTest is Test {
     function testVault_performanceFeeRespectsMaxCap() public {
         vm.prank(curator);
         vm.expectRevert();
-        vault.setPerformanceFee(2_500);  // 25% > 20% max
+        vault.setPerformanceFee(2_500); // 25% > 20% max
 
-        assertEq(vault.performanceFeeBps(), 1_000);  // unchanged
+        assertEq(vault.performanceFeeBps(), 1_000); // unchanged
     }
 
     /**
@@ -418,8 +417,7 @@ contract VaultSentinelTest is Test {
 
         // The delta should be approximately expected shares — NOT expected + fee-on-principal
         // Allow 1 share tolerance for rounding
-        assertApproxEqAbs(shareDelta, expectedShares, 1,
-            "no fee shares minted on deposit principal");
+        assertApproxEqAbs(shareDelta, expectedShares, 1, "no fee shares minted on deposit principal");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -431,7 +429,7 @@ contract VaultSentinelTest is Test {
         vault.deposit(10_000 * 1e6, address(this));
 
         vm.expectRevert();
-        vault.allocate(address(marketA), 1_000 * 1e6);  // test contract has no ALLOCATOR_ROLE
+        vault.allocate(address(marketA), 1_000 * 1e6); // test contract has no ALLOCATOR_ROLE
     }
 
     function testVault_allocatorCanAllocate() public {
@@ -517,18 +515,18 @@ contract VaultSentinelTest is Test {
     function testVault_setTimelockTooShortReverts() public {
         vm.prank(curator);
         vm.expectRevert();
-        vault.setTimelock(30 seconds);  // < 1 minute minimum
+        vault.setTimelock(30 seconds); // < 1 minute minimum
     }
 
     function testVault_setTimelockTooLongReverts() public {
         vm.prank(curator);
         vm.expectRevert();
-        vault.setTimelock(4 weeks);  // > 3 week maximum
+        vault.setTimelock(4 weeks); // > 3 week maximum
     }
 
     function testVault_setPerformanceFee() public {
         vm.prank(curator);
-        vault.setPerformanceFee(500);  // 5%
+        vault.setPerformanceFee(500); // 5%
         assertEq(vault.performanceFeeBps(), 500);
     }
 
@@ -596,11 +594,9 @@ contract VaultSentinelTest is Test {
     }
 
     function testSentinel_nonAdminCannotRegister() public {
-        CuratedVault v2 = new CuratedVault(
-            address(usdc), "V2", "V2", admin, curator, allocator, address(this)
-        );
+        CuratedVault v2 = new CuratedVault(address(usdc), "V2", "V2", admin, curator, allocator, address(this));
         vm.expectRevert();
-        sentinel.registerVault(address(v2), false);  // test contract is not sentinel admin
+        sentinel.registerVault(address(v2), false); // test contract is not sentinel admin
     }
 
     function testSentinel_getVaultList() public {
@@ -612,7 +608,7 @@ contract VaultSentinelTest is Test {
     function testSentinel_cannotRegisterTwice() public {
         vm.prank(admin);
         vm.expectRevert();
-        sentinel.registerVault(address(vault), false);  // already registered in setUp
+        sentinel.registerVault(address(vault), false); // already registered in setUp
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -646,7 +642,7 @@ contract VaultSentinelTest is Test {
 
         // 0.01 (mock floor) + 0.07*3 = 0.22 ETH exactly
         uint256 minRequired = platform.getRequestDeposit() + LLM_COST_PER_AGENT * SUBCOMMITTEE_SIZE;
-        sentinel.checkVault{value: minRequired}(address(vault));  // must not revert
+        sentinel.checkVault{value: minRequired}(address(vault)); // must not revert
         assertTrue(sentinel.isCheckPending(address(vault)));
     }
 
@@ -761,10 +757,10 @@ contract VaultSentinelTest is Test {
         usdc.approve(address(vault), 10_000 * 1e6);
         vault.deposit(10_000 * 1e6, address(this));
         vm.startPrank(allocator);
-        vault.allocate(address(marketA), 8_000 * 1e6);  // highest util
+        vault.allocate(address(marketA), 8_000 * 1e6); // highest util
         vault.allocate(address(marketB), 1_000 * 1e6);
         vm.stopPrank();
-        marketA.setUtilization(96);  // >90% threshold → will be deallocated
+        marketA.setUtilization(96); // >90% threshold → will be deallocated
         marketB.setUtilization(10);
 
         uint256 marketABefore = marketA.balanceOf(address(vault));
@@ -784,7 +780,7 @@ contract VaultSentinelTest is Test {
         vault.deposit(10_000 * 1e6, address(this));
         vm.prank(allocator);
         vault.allocate(address(marketA), 8_000 * 1e6);
-        marketA.setUtilization(88);  // <90% → no emergency deallocate
+        marketA.setUtilization(88); // <90% → no emergency deallocate
 
         uint256 marketABefore = marketA.balanceOf(address(vault));
 
@@ -793,8 +789,7 @@ contract VaultSentinelTest is Test {
 
         // Vault paused but no deallocation (util < 9000 bps threshold)
         assertTrue(vault.depositsPaused());
-        assertEq(marketA.balanceOf(address(vault)), marketABefore,
-            "no deallocation when util < 90%");
+        assertEq(marketA.balanceOf(address(vault)), marketABefore, "no deallocation when util < 90%");
     }
 
     function testSentinel_timeoutTriggersFailSafeCAUTION() public {
@@ -805,8 +800,7 @@ contract VaultSentinelTest is Test {
         platform.simulateTimeout(_latestRequestId());
 
         (VaultSentinel.RiskLevel level,, string memory verdict) = sentinel.getLatestRisk(address(vault));
-        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Caution),
-            "timeout must default to CAUTION not SAFE");
+        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Caution), "timeout must default to CAUTION not SAFE");
         assertEq(verdict, "AI_UNAVAILABLE");
     }
 
@@ -818,8 +812,9 @@ contract VaultSentinelTest is Test {
         platform.simulateCallback(_latestRequestId(), "GARBAGE_VERDICT");
 
         (VaultSentinel.RiskLevel level,,) = sentinel.getLatestRisk(address(vault));
-        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Caution),
-            "unrecognised verdict must default to CAUTION");
+        assertEq(
+            uint256(level), uint256(VaultSentinel.RiskLevel.Caution), "unrecognised verdict must default to CAUTION"
+        );
     }
 
     function testSentinel_auditTrailPersists() public {
@@ -844,26 +839,32 @@ contract VaultSentinelTest is Test {
     function testSentinel_onlyPlatformCanCallback() public {
         Response[] memory responses = new Response[](1);
         responses[0] = Response({
-            validator:     address(this),
-            result:        abi.encode("CRITICAL"),
-            status:        ResponseStatus.Success,
-            receipt:       0,
-            timestamp:     block.timestamp,
+            validator: address(this),
+            result: abi.encode("CRITICAL"),
+            status: ResponseStatus.Success,
+            receipt: 0,
+            timestamp: block.timestamp,
             executionCost: 0
         });
 
-        address[] memory sub   = new address[](0);
+        address[] memory sub = new address[](0);
         Response[] memory empty = new Response[](0);
         Request memory req = Request({
-            id: 999, requester: address(this),
+            id: 999,
+            requester: address(this),
             callbackAddress: address(sentinel),
             callbackSelector: sentinel.handleResponse.selector,
-            subcommittee: sub, responses: empty,
-            responseCount: 1, failureCount: 0, threshold: 1,
-            createdAt: block.timestamp, deadline: block.timestamp + 60,
+            subcommittee: sub,
+            responses: empty,
+            responseCount: 1,
+            failureCount: 0,
+            threshold: 1,
+            createdAt: block.timestamp,
+            deadline: block.timestamp + 60,
             status: ResponseStatus.Success,
             consensusType: ConsensusType.Majority,
-            remainingBudget: 0, perAgentBudget: 0
+            remainingBudget: 0,
+            perAgentBudget: 0
         });
 
         vm.expectRevert();
@@ -872,22 +873,19 @@ contract VaultSentinelTest is Test {
 
     function testSentinel_autoPauseDisabledDoesNotPause() public {
         // Deploy a vault with autoPause = false
-        CuratedVault vaultNoPause = new CuratedVault(
-            address(usdc), "NoPause", "NP", admin, curator, allocator, address(this)
-        );
+        CuratedVault vaultNoPause =
+            new CuratedVault(address(usdc), "NoPause", "NP", admin, curator, allocator, address(this));
         vm.prank(admin);
         vaultNoPause.grantRole(SENTINEL_ROLE, address(sentinel));
 
-        MockLendingMarket mkt = new MockLendingMarket(
-            address(usdc), address(vaultNoPause), "NoPause Market"
-        );
+        MockLendingMarket mkt = new MockLendingMarket(address(usdc), address(vaultNoPause), "NoPause Market");
         vm.prank(curator);
         vaultNoPause.submitAddMarket(address(mkt), 50_000 * 1e6);
         vm.warp(block.timestamp + 3601);
         vaultNoPause.executeAddMarket(address(mkt), 50_000 * 1e6);
 
         vm.prank(admin);
-        sentinel.registerVault(address(vaultNoPause), false);  // autoPause = false
+        sentinel.registerVault(address(vaultNoPause), false); // autoPause = false
 
         usdc.approve(address(vaultNoPause), 10_000 * 1e6);
         vaultNoPause.deposit(10_000 * 1e6, address(this));
@@ -953,9 +951,8 @@ contract VaultSentinelTest is Test {
      */
     function testSentinel_allMarketsIncludedBeyondFour() public {
         // Deploy a fresh vault with 5 markets
-        CuratedVault vault5 = new CuratedVault(
-            address(usdc), "5-Market Vault", "V5", admin, curator, allocator, address(this)
-        );
+        CuratedVault vault5 =
+            new CuratedVault(address(usdc), "5-Market Vault", "V5", admin, curator, allocator, address(this));
         vm.prank(admin);
         vault5.grantRole(SENTINEL_ROLE, address(sentinel));
 
@@ -992,15 +989,16 @@ contract VaultSentinelTest is Test {
         vm.stopPrank();
 
         // Only the 5th market is at critical utilization
-        for (uint256 i; i < 4; i++) mkts[i].setUtilization(10);
-        mkts[4].setUtilization(96);  // index 4 — previously invisible
+        for (uint256 i; i < 4; i++) {
+            mkts[i].setUtilization(10);
+        }
+        mkts[4].setUtilization(96); // index 4 — previously invisible
 
         sentinel.checkVault{value: CHECK_VALUE}(address(vault5));
         // Simulate what the AI would respond seeing all 5 markets in the prompt
         platform.simulateCallback(_latestRequestId(), "CRITICAL");
 
-        assertTrue(vault5.depositsPaused(),
-            "vault must be paused when 5th market is at critical utilization");
+        assertTrue(vault5.depositsPaused(), "vault must be paused when 5th market is at critical utilization");
         (VaultSentinel.RiskLevel level,,) = sentinel.getLatestRisk(address(vault5));
         assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Critical));
     }
@@ -1096,12 +1094,8 @@ contract VaultSentinelTest is Test {
      */
     function testIntegration_multipleVaultsIndependent() public {
         // Deploy second vault
-        CuratedVault vault2 = new CuratedVault(
-            address(usdc), "Vault 2", "V2", admin, curator, allocator, address(this)
-        );
-        MockLendingMarket marketC = new MockLendingMarket(
-            address(usdc), address(vault2), "Market C"
-        );
+        CuratedVault vault2 = new CuratedVault(address(usdc), "Vault 2", "V2", admin, curator, allocator, address(this));
+        MockLendingMarket marketC = new MockLendingMarket(address(usdc), address(vault2), "Market C");
 
         vm.prank(admin);
         vault2.grantRole(SENTINEL_ROLE, address(sentinel));
@@ -1113,7 +1107,7 @@ contract VaultSentinelTest is Test {
 
         // vault is already registered in setUp; register vault2 only
         vm.prank(admin);
-        sentinel.registerVault(address(vault2), false);  // autoPause disabled for vault2
+        sentinel.registerVault(address(vault2), false); // autoPause disabled for vault2
 
         // Fund vault1 (healthy)
         usdc.approve(address(vault), 5_000 * 1e6);
@@ -1126,7 +1120,7 @@ contract VaultSentinelTest is Test {
         usdc.approve(address(vault2), 5_000 * 1e6);
         vault2.deposit(5_000 * 1e6, address(this));
         vm.prank(allocator);
-        vault2.allocate(address(marketC), 4_500 * 1e6);  // ~90% allocation
+        vault2.allocate(address(marketC), 4_500 * 1e6); // ~90% allocation
         marketC.setUtilization(96);
 
         // Check vault1 → SAFE

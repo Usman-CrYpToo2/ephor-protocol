@@ -5,8 +5,8 @@ out/
 # Broadcast logs
 broadcast/
 
-# Claude Code session data
-.claude/
+# Claude Code — ignore local settings, track project commands and specs
+.claude/settings.local.json
 
 # Docs
 docs/
@@ -40,3 +40,7 @@ explanation.md
 store.md
 SECURITY_AUDIT_REPORT.md
 vulnerability_summary.md
+
+# Auto-added by /commit — runtime output & scratch files
+history.txt
+submission.txt

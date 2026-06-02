@@ -23,90 +23,131 @@ pragma solidity ^0.8.20;
  */
 
 interface IERC20 {
-    function balanceOf(address)                           external view returns (uint256);
-    function transfer(address to, uint256 amount)         external returns (bool);
+    function balanceOf(address) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address f, address t, uint256 a) external returns (bool);
-    function approve(address spender, uint256 amount)     external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 interface ILendingMarket {
-    function supply(uint256 amount)          external;
-    function withdraw(uint256 amount)        external;
-    function balanceOf(address account)      external view returns (uint256);
-    function utilizationBps()               external view returns (uint256);
+    function supply(uint256 amount) external;
+    function withdraw(uint256 amount) external;
+    function balanceOf(address account) external view returns (uint256);
+    function utilizationBps() external view returns (uint256);
 }
 
 // ── Minimal inline ERC-20 (shares token) ────────────────────────────────────
 abstract contract ERC20Base {
-    string  public name;
-    string  public symbol;
-    uint8   public constant decimals = 18;
+    string public name;
+    string public symbol;
+    uint8 public constant decimals = 18;
 
     uint256 public totalSupply;
-    mapping(address => uint256)                     public balanceOf;
+    mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    event Transfer(address indexed from, address indexed to,       uint256 v);
+    event Transfer(address indexed from, address indexed to, uint256 v);
     event Approval(address indexed owner, address indexed spender, uint256 v);
 
-    constructor(string memory _n, string memory _s) { name = _n; symbol = _s; }
+    constructor(string memory _n, string memory _s) {
+        name = _n;
+        symbol = _s;
+    }
 
-    function transfer(address to, uint256 v) external returns (bool)
-        { _transfer(msg.sender, to, v); return true; }
-    function approve(address sp, uint256 v) external returns (bool)
-        { allowance[msg.sender][sp] = v; emit Approval(msg.sender, sp, v); return true; }
-    function transferFrom(address f, address t, uint256 v) external returns (bool)
-        { _spend(f, msg.sender, v); _transfer(f, t, v); return true; }
+    function transfer(address to, uint256 v) external returns (bool) {
+        _transfer(msg.sender, to, v);
+        return true;
+    }
+
+    function approve(address sp, uint256 v) external returns (bool) {
+        allowance[msg.sender][sp] = v;
+        emit Approval(msg.sender, sp, v);
+        return true;
+    }
+
+    function transferFrom(address f, address t, uint256 v) external returns (bool) {
+        _spend(f, msg.sender, v);
+        _transfer(f, t, v);
+        return true;
+    }
 
     function _transfer(address f, address t, uint256 v) internal {
         require(t != address(0) && balanceOf[f] >= v, "ERC20: transfer");
-        balanceOf[f] -= v; balanceOf[t] += v; emit Transfer(f, t, v);
+        balanceOf[f] -= v;
+        balanceOf[t] += v;
+        emit Transfer(f, t, v);
     }
+
     function _mint(address t, uint256 v) internal {
         require(t != address(0), "ERC20: mint zero");
-        totalSupply += v; balanceOf[t] += v; emit Transfer(address(0), t, v);
+        totalSupply += v;
+        balanceOf[t] += v;
+        emit Transfer(address(0), t, v);
     }
+
     function _burn(address f, uint256 v) internal {
         require(balanceOf[f] >= v, "ERC20: burn");
-        balanceOf[f] -= v; totalSupply -= v; emit Transfer(f, address(0), v);
+        balanceOf[f] -= v;
+        totalSupply -= v;
+        emit Transfer(f, address(0), v);
     }
+
     function _spend(address o, address sp, uint256 v) internal {
         uint256 a = allowance[o][sp];
-        if (a != type(uint256).max) { require(a >= v, "ERC20: allowance"); allowance[o][sp] = a - v; }
+        if (a != type(uint256).max) require(a >= v, "ERC20: allowance");
+        allowance[o][sp] = a - v;
     }
 }
 
 // ── Inline AccessControl ─────────────────────────────────────────────────────
 abstract contract AccessControl {
     bytes32 public constant DEFAULT_ADMIN_ROLE = bytes32(0);
-    bytes32 public constant CURATOR_ROLE       = keccak256("CURATOR_ROLE");
-    bytes32 public constant ALLOCATOR_ROLE     = keccak256("ALLOCATOR_ROLE");
-    bytes32 public constant SENTINEL_ROLE      = keccak256("SENTINEL_ROLE");
+    bytes32 public constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
+    bytes32 public constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
+    bytes32 public constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
 
     mapping(bytes32 => mapping(address => bool)) private _r;
 
     event RoleGranted(bytes32 indexed role, address indexed account);
     event RoleRevoked(bytes32 indexed role, address indexed account);
 
-    modifier onlyRole(bytes32 role) { require(_r[role][msg.sender], "missing role"); _; }
+    modifier onlyRole(bytes32 role) {
+        require(_r[role][msg.sender], "missing role");
+        _;
+    }
 
-    function hasRole(bytes32 role, address a) public view returns (bool) { return _r[role][a]; }
-    function grantRole(bytes32 role, address a) external onlyRole(DEFAULT_ADMIN_ROLE)
-        { _r[role][a] = true;  emit RoleGranted(role, a); }
-    function revokeRole(bytes32 role, address a) external onlyRole(DEFAULT_ADMIN_ROLE)
-        { _r[role][a] = false; emit RoleRevoked(role, a); }
-    function _setupRole(bytes32 role, address a) internal { _r[role][a] = true; }
+    function hasRole(bytes32 role, address a) public view returns (bool) {
+        return _r[role][a];
+    }
+
+    function grantRole(bytes32 role, address a) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _r[role][a] = true;
+        emit RoleGranted(role, a);
+    }
+
+    function revokeRole(bytes32 role, address a) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _r[role][a] = false;
+        emit RoleRevoked(role, a);
+    }
+
+    function _setupRole(bytes32 role, address a) internal {
+        _r[role][a] = true;
+    }
 }
 
 // ── Inline ReentrancyGuard ───────────────────────────────────────────────────
 abstract contract ReentrancyGuard {
     uint256 private _s = 1;
-    modifier nonReentrant() { require(_s == 1, "reentrant"); _s = 2; _; _s = 1; }
+    modifier nonReentrant() {
+        require(_s == 1, "reentrant");
+        _s = 2;
+        _;
+        _s = 1;
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
-
     // ERC-4626 inflation-attack protection offsets
     uint256 private constant VSHARES = 1;
     uint256 private constant VASSETS = 1;
@@ -114,25 +155,31 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // Timelock bounds
     uint256 public constant MIN_TIMELOCK = 1 minutes;
     uint256 public constant MAX_TIMELOCK = 3 weeks;
-    uint256 public timelock = 1 minutes;     // 1 min for testnet demo; 24h+ on mainnet
+    uint256 public timelock = 1 minutes; // 1 min for testnet demo; 24h+ on mainnet
 
     // Fees
-    uint256 public constant MAX_FEE_BPS = 2_000;  // 20%
-    uint256 public performanceFeeBps    = 1_000;  // 10%
+    uint256 public constant MAX_FEE_BPS = 2_000; // 20%
+    uint256 public performanceFeeBps = 1_000; // 10%
     address public feeRecipient;
 
     IERC20 public immutable asset;
 
     // Market registry
-    struct MarketCfg { bool enabled; uint256 supplyCap; }
+    struct MarketCfg {
+        bool enabled;
+        uint256 supplyCap;
+    }
     mapping(address => MarketCfg) public markets;
     address[] private _mlist;
 
     // Timelock queue
-    struct Pending { uint256 eta; bool exists; }
+    struct Pending {
+        uint256 eta;
+        bool exists;
+    }
     mapping(bytes32 => Pending) public pendingActions;
 
-    bool    public depositsPaused;
+    bool public depositsPaused;
     uint256 private _lastTA; // totalAssets snapshot for fee accrual
 
     // ── Events ───────────────────────────────────────────────────────
@@ -153,19 +200,19 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // ── Constructor ──────────────────────────────────────────────────
     constructor(
         address _asset,
-        string  memory _name,
-        string  memory _symbol,
+        string memory _name,
+        string memory _symbol,
         address _admin,
         address _curator,
         address _allocator,
         address _feeRecipient
     ) ERC20Base(_name, _symbol) {
         require(_asset != address(0) && _admin != address(0) && _feeRecipient != address(0), "zero addr");
-        asset        = IERC20(_asset);
+        asset = IERC20(_asset);
         feeRecipient = _feeRecipient;
         _setupRole(DEFAULT_ADMIN_ROLE, _admin);
-        _setupRole(CURATOR_ROLE,       _curator);
-        _setupRole(ALLOCATOR_ROLE,     _allocator);
+        _setupRole(CURATOR_ROLE, _curator);
+        _setupRole(ALLOCATOR_ROLE, _allocator);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -173,8 +220,8 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════
 
     function deposit(uint256 assets, address receiver) external nonReentrant returns (uint256 shares) {
-        require(!depositsPaused,        "deposits paused");
-        require(assets > 0,             "zero assets");
+        require(!depositsPaused, "deposits paused");
+        require(assets > 0, "zero assets");
         require(receiver != address(0), "zero receiver");
         _accruePerformanceFee();
         shares = _toShares(assets);
@@ -209,14 +256,22 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
         for (uint256 i; i < n;) {
             address m = _mlist[i];
             if (markets[m].enabled) t += ILendingMarket(m).balanceOf(address(this));
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         return t;
     }
 
-    function previewDeposit(uint256 assets_) external view returns (uint256) { return _toShares(assets_); }
-    function previewRedeem(uint256 shares_)  external view returns (uint256) { return _toAssets(shares_); }
-    function sharePrice()                   external view returns (uint256) {
+    function previewDeposit(uint256 assets_) external view returns (uint256) {
+        return _toShares(assets_);
+    }
+
+    function previewRedeem(uint256 shares_) external view returns (uint256) {
+        return _toAssets(shares_);
+    }
+
+    function sharePrice() external view returns (uint256) {
         return (totalAssets() + VASSETS) * 1e18 / (totalSupply + VSHARES);
     }
 
@@ -257,8 +312,8 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     function executeAddMarket(address market, uint256 cap) external nonReentrant {
         bytes32 id = keccak256(abi.encodePacked("addMarket", market, cap));
         Pending storage p = pendingActions[id];
-        require(p.exists,                          "no pending action");
-        require(block.timestamp >= p.eta,          "timelock active");
+        require(p.exists, "no pending action");
+        require(block.timestamp >= p.eta, "timelock active");
         markets[market] = MarketCfg(true, cap);
         _mlist.push(market);
         delete pendingActions[id];
@@ -269,7 +324,7 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
         require(markets[market].enabled, "not enabled");
         if (newCap > markets[market].supplyCap) {
             require(hasRole(CURATOR_ROLE, msg.sender), "curator only");
-            bytes32 id  = keccak256(abi.encodePacked("setCap", market, newCap));
+            bytes32 id = keccak256(abi.encodePacked("setCap", market, newCap));
             require(!pendingActions[id].exists, "already queued");
             uint256 eta = block.timestamp + timelock;
             pendingActions[id] = Pending(eta, true);
@@ -323,17 +378,20 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
 
     function setTimelock(uint256 d) external onlyRole(CURATOR_ROLE) {
         require(d >= MIN_TIMELOCK && d <= MAX_TIMELOCK, "bad delay");
-        timelock = d; emit TimelockUpdated(d);
+        timelock = d;
+        emit TimelockUpdated(d);
     }
 
     function setPerformanceFee(uint256 bps) external onlyRole(CURATOR_ROLE) {
         require(bps <= MAX_FEE_BPS, "fee too high");
         _accruePerformanceFee();
-        performanceFeeBps = bps; emit FeeUpdated(bps);
+        performanceFeeBps = bps;
+        emit FeeUpdated(bps);
     }
 
     function setFeeRecipient(address r) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(r != address(0), "zero"); feeRecipient = r;
+        require(r != address(0), "zero");
+        feeRecipient = r;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -341,17 +399,24 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════
 
     function marketAllocationPct(address market) external view returns (uint256) {
-        uint256 t = totalAssets(); if (t == 0) return 0;
+        uint256 t = totalAssets();
+        if (t == 0) return 0;
         return ILendingMarket(market).balanceOf(address(this)) * 100 / t;
     }
 
     function idleBufferPct() external view returns (uint256) {
-        uint256 t = totalAssets(); if (t == 0) return 0;
+        uint256 t = totalAssets();
+        if (t == 0) return 0;
         return asset.balanceOf(address(this)) * 100 / t;
     }
 
-    function marketCount() external view returns (uint256) { return _mlist.length; }
-    function marketList(uint256 i) external view returns (address) { return _mlist[i]; }
+    function marketCount() external view returns (uint256) {
+        return _mlist.length;
+    }
+
+    function marketList(uint256 i) external view returns (address) {
+        return _mlist[i];
+    }
 
     // ═══════════════════════════════════════════════════════════════
     //  INTERNAL
@@ -360,6 +425,7 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     function _toShares(uint256 a) internal view returns (uint256) {
         return a * (totalSupply + VSHARES) / (totalAssets() + VASSETS);
     }
+
     function _toAssets(uint256 s) internal view returns (uint256) {
         return s * (totalAssets() + VASSETS) / (totalSupply + VSHARES);
     }
@@ -368,9 +434,11 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
         uint256 idle = asset.balanceOf(address(this));
         if (idle >= needed) return;
         uint256 gap = needed - idle;
-        uint256 n   = _mlist.length;
+        uint256 n = _mlist.length;
         for (uint256 i = n; i > 0;) {
-            unchecked { --i; }
+            unchecked {
+                --i;
+            }
             address m = _mlist[i];
             if (!markets[m].enabled) continue;
             uint256 av = ILendingMarket(m).balanceOf(address(this));
@@ -386,12 +454,14 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     function _accruePerformanceFee() internal {
         uint256 cur = totalAssets();
         if (cur <= _lastTA || totalSupply == 0 || performanceFeeBps == 0) {
-            _lastTA = cur; return;
+            _lastTA = cur;
+            return;
         }
-        uint256 gain     = cur - _lastTA;
-        uint256 feeA     = gain * performanceFeeBps / 10_000;
+        uint256 gain = cur - _lastTA;
+        uint256 feeA = gain * performanceFeeBps / 10_000;
         uint256 feeShares = feeA * (totalSupply + VSHARES) / (cur + VASSETS);
-        if (feeShares > 0) { _mint(feeRecipient, feeShares); emit FeeMinted(feeRecipient, feeShares, gain); }
+        if (feeShares > 0) _mint(feeRecipient, feeShares);
+        emit FeeMinted(feeRecipient, feeShares, gain);
         _lastTA = cur;
     }
 }

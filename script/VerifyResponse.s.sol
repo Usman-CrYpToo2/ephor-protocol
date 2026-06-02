@@ -29,17 +29,16 @@ import "../src/VaultSentinel.sol";
 import "../src/Mock/MockLendingMarket.sol";
 
 contract VerifyResponse is Script {
-
     function run() external view {
-        address vaultAddr    = vm.envAddress("CURATED_VAULT_ADDRESS");
+        address vaultAddr = vm.envAddress("CURATED_VAULT_ADDRESS");
         address sentinelAddr = vm.envAddress("VAULT_SENTINEL_ADDRESS");
-        address marketAAddr  = vm.envAddress("MARKET_A_ADDRESS");
-        address marketBAddr  = vm.envAddress("MARKET_B_ADDRESS");
+        address marketAAddr = vm.envAddress("MARKET_A_ADDRESS");
+        address marketBAddr = vm.envAddress("MARKET_B_ADDRESS");
 
-        VaultSentinel     sentinel = VaultSentinel(payable(sentinelAddr));
-        CuratedVault      vault    = CuratedVault(vaultAddr);
-        MockLendingMarket marketA  = MockLendingMarket(marketAAddr);
-        MockLendingMarket marketB  = MockLendingMarket(marketBAddr);
+        VaultSentinel sentinel = VaultSentinel(payable(sentinelAddr));
+        CuratedVault vault = CuratedVault(vaultAddr);
+        MockLendingMarket marketA = MockLendingMarket(marketAAddr);
+        MockLendingMarket marketB = MockLendingMarket(marketBAddr);
 
         console.log("\n========= EPHOR PROTOCOL - TESTNET VERIFICATION =========\n");
 
@@ -55,9 +54,11 @@ contract VerifyResponse is Script {
     }
 
     function _printRequestStatus(VaultSentinel sentinel, address vaultAddr)
-        internal view returns (bool callbackReceived)
+        internal
+        view
+        returns (bool callbackReceived)
     {
-        bool isPending      = sentinel.isCheckPending(vaultAddr);
+        bool isPending = sentinel.isCheckPending(vaultAddr);
         uint256 activeReqId = sentinel.activeRequest(vaultAddr);
 
         console.log("--- REQUEST STATUS ---");
@@ -71,19 +72,18 @@ contract VerifyResponse is Script {
     }
 
     function _printVerdict(VaultSentinel sentinel, address vaultAddr) internal view {
-        (VaultSentinel.RiskLevel latestLevel, uint256 latestTs, string memory latestVerdict)
-            = sentinel.getLatestRisk(vaultAddr);
+        (VaultSentinel.RiskLevel latestLevel, uint256 latestTs, string memory latestVerdict) =
+            sentinel.getLatestRisk(vaultAddr);
 
         VaultSentinel.RiskSnapshot[] memory history = sentinel.getHistory(vaultAddr);
 
-        (,, VaultSentinel.RiskLevel lastLevel,
-         uint256 lastCheckedAt, uint256 totalChecks, uint256 criticalCount)
-            = sentinel.vaultInfo(vaultAddr);
+        (,, VaultSentinel.RiskLevel lastLevel, uint256 lastCheckedAt, uint256 totalChecks, uint256 criticalCount) =
+            sentinel.vaultInfo(vaultAddr);
 
         string memory levelStr;
-        if (uint256(latestLevel) == 0)      levelStr = "SAFE";
+        if (uint256(latestLevel) == 0) levelStr = "SAFE";
         else if (uint256(latestLevel) == 1) levelStr = "CAUTION";
-        else                                levelStr = "CRITICAL";
+        else levelStr = "CRITICAL";
 
         console.log("\n--- AI VERDICT ---");
         console.log("latestLevel:        ", levelStr);
@@ -102,15 +102,15 @@ contract VerifyResponse is Script {
         MockLendingMarket marketB,
         address vaultAddr
     ) internal view {
-        bool     paused   = vault.depositsPaused();
-        uint256  totalA   = vault.totalAssets();
-        uint256  idlePct  = vault.idleBufferPct();
-        uint256  mktAPct  = vault.marketAllocationPct(address(marketA));
-        uint256  mktBPct  = vault.marketAllocationPct(address(marketB));
-        uint256  mktABal  = marketA.balanceOf(vaultAddr);
-        uint256  mktBBal  = marketB.balanceOf(vaultAddr);
-        uint256  mktAUtil = marketA.utilizationBps();
-        uint256  mktBUtil = marketB.utilizationBps();
+        bool paused = vault.depositsPaused();
+        uint256 totalA = vault.totalAssets();
+        uint256 idlePct = vault.idleBufferPct();
+        uint256 mktAPct = vault.marketAllocationPct(address(marketA));
+        uint256 mktBPct = vault.marketAllocationPct(address(marketB));
+        uint256 mktABal = marketA.balanceOf(vaultAddr);
+        uint256 mktBBal = marketB.balanceOf(vaultAddr);
+        uint256 mktAUtil = marketA.utilizationBps();
+        uint256 mktBUtil = marketB.utilizationBps();
 
         console.log("\n--- VAULT STATE ---");
         console.log("depositsPaused:     ", paused);
@@ -124,14 +124,12 @@ contract VerifyResponse is Script {
         console.log("Market B util (bps):", mktBUtil);
     }
 
-    function _printAnalysis(
-        VaultSentinel sentinel,
-        CuratedVault  vault,
-        MockLendingMarket marketA,
-        address vaultAddr
-    ) internal view {
+    function _printAnalysis(VaultSentinel sentinel, CuratedVault vault, MockLendingMarket marketA, address vaultAddr)
+        internal
+        view
+    {
         (VaultSentinel.RiskLevel latestLevel,,) = sentinel.getLatestRisk(vaultAddr);
-        bool    paused  = vault.depositsPaused();
+        bool paused = vault.depositsPaused();
         uint256 mktABal = marketA.balanceOf(vaultAddr);
 
         console.log("\n--- ANALYSIS ---");
