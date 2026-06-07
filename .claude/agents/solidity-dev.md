@@ -45,7 +45,26 @@ Then read that section with offset/limit.
 
 ### STEP 2 — Read the source files you will modify
 
-Read the actual contracts and tests you will change. Do not read contracts unrelated to the task.
+**CRITICAL — file size rules (enforced, no exceptions):**
+
+**`test/VaultSentinelTest.t.sol` is 2679+ lines (~31k tokens). NEVER read it fully.**
+Always use this two-step approach:
+```bash
+# Step 1: find group boundaries and last line number
+grep -n "// ── GROUP\|// ══" test/VaultSentinelTest.t.sol | tail -10
+wc -l test/VaultSentinelTest.t.sol
+
+# Step 2: read only setUp (lines 1-80) + last GROUP section (last ~200 lines)
+# Use Read with offset/limit to target exactly what you need
+```
+Only read the full file if you have a specific compile error that requires understanding all imports.
+
+**Source contracts (CuratedVault.sol ~37KB, VaultSentinel.sol ~39KB) — never read fully when you only need one function.**
+```bash
+grep -n "function functionName\|struct StructName\|error ErrorName" src/ContractName.sol
+# Then Read with offset/limit around those line numbers only
+```
+Read full contracts only if you need overall structure for a new feature spanning the whole file.
 
 **Do NOT read the skill reference files** (`references/01-*.md` through `references/07-*.md`). They contain general Solidity knowledge you already have from training. Only read them if you have a specific question you cannot answer from your own knowledge.
 

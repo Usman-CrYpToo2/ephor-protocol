@@ -100,11 +100,11 @@ Check exit code. If non-zero — show full output and stop:
 ## Phase 6 — Full Test Suite
 
 ```bash
-forge test 2>&1
+forge test 2>&1 | grep -E "(FAIL|Suite result|Failing tests|Encountered a total)" | head -20
 ```
 
-- Any failure → re-run `forge test -vvv 2>&1 | tail -80` to show failure traces, then stop.
-- All pass → proceed.
+- All pass → the grep output will show only the passing Suite result line → proceed.
+- Any failure → re-run `forge test --rerun 2>&1 | tail -60` to show failure traces, then stop.
 
 ---
 

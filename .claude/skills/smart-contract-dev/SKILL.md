@@ -78,17 +78,19 @@ No feature should be implemented without consciously answering all eight.
 
 ## Reference Files — Navigation Guide
 
-This framework is organized into seven deep-reference modules. Load the relevant one(s) based on the current task:
+This framework has seven deep-reference modules in `references/`. Each file is 10-13KB.
 
-| Module | File | When to Load |
-|--------|------|-------------|
-| **Engineering Mindset** | `references/01-engineering-mindset.md` | Requirements analysis, invariant design, threat modeling, architectural decisions |
-| **Architecture Patterns** | `references/02-architecture-patterns.md` | Protocol design, proxy patterns, access control, composability, DeFi primitives |
-| **Security Framework** | `references/03-security-framework.md` | Vulnerability analysis, attack vectors, audit methodology, security review |
-| **Testing Strategies** | `references/04-testing-strategies.md` | Unit/fuzz/invariant/formal testing, coverage, CI, mutation testing |
-| **Code Quality** | `references/05-code-quality.md` | Solidity style, NatSpec, error handling, events, struct packing, review checklists |
-| **Gas & Performance** | `references/06-gas-and-performance.md` | Storage optimization, calldata, assembly, when (not) to optimize |
-| **Protocol Lifecycle** | `references/07-protocol-lifecycle.md` | Upgradeability, governance, timelocks, incident response, post-mortems |
+**Do NOT read these files proactively.** They total 73KB (~18k tokens). Only read a specific reference file when you have a concrete question you cannot answer from your training knowledge. Read the minimum needed — use offset/limit for specific sections.
+
+| Module | File | Topic |
+|--------|------|-------|
+| Engineering Mindset | `references/01-engineering-mindset.md` | Invariant design, threat modeling |
+| Architecture Patterns | `references/02-architecture-patterns.md` | Protocol design, access control |
+| Security Framework | `references/03-security-framework.md` | Vulnerability analysis, audit methodology |
+| Testing Strategies | `references/04-testing-strategies.md` | Fuzz/invariant testing, coverage |
+| Code Quality | `references/05-code-quality.md` | Solidity style, error handling |
+| Gas & Performance | `references/06-gas-and-performance.md` | Storage optimization, assembly |
+| Protocol Lifecycle | `references/07-protocol-lifecycle.md` | Upgradeability, governance, timelocks |
 
 ---
 

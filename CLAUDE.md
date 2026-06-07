@@ -11,14 +11,14 @@ forge install
 # Build
 forge build
 
-# Run all tests (verbose)
-forge test -vvv
+# Run all tests
+forge test
 
-# Run a single test by name
-forge test --match-test testName -vvv
+# Run a single test (add -vvv only when debugging a failure)
+forge test --match-test testName
 
 # Run a test contract
-forge test --match-contract VaultSentinelTest -vvv
+forge test --match-contract VaultSentinelTest
 
 # Format
 forge fmt
