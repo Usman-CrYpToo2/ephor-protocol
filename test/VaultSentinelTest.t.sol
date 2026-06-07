@@ -981,14 +981,15 @@ contract VaultSentinelTest is Test {
         vm.prank(admin);
         sentinel.registerVault(address(vault5), true);
 
-        // Deposit 100k, allocate 20k to each market
+        // Deposit 100k, allocate 18k to each market (leaves 10k = 10% idle, respects minIdleBufferBps).
+        // The test's goal is sentinel coverage of all 5 markets — full allocation is not required.
         usdc.mint(address(this), 100_000 * 1e6);
         usdc.approve(address(vault5), 100_000 * 1e6);
         vault5.deposit(100_000 * 1e6, address(this));
 
         vm.startPrank(allocator);
         for (uint256 i; i < 5; i++) {
-            vault5.allocate(address(mkts[i]), 20_000 * 1e6);
+            vault5.allocate(address(mkts[i]), 18_000 * 1e6);
         }
         vm.stopPrank();
 
@@ -1260,8 +1261,12 @@ contract VaultSentinelTest is Test {
     function testFuzz_marketAllocationBps_isConsistentWithBalance(uint256 depositAmount, uint256 allocAmount) public {
         // Bound to realistic vault ranges (1 USDC to 49,999 USDC per market cap)
         depositAmount = bound(depositAmount, 1_000 * 1e6, 100_000 * 1e6);
-        // Must not exceed supply cap (50_000 * 1e6) and must be at most total deposit
-        allocAmount = bound(allocAmount, 0, depositAmount < 50_000 * 1e6 ? depositAmount : 49_999 * 1e6);
+        // Must not exceed supply cap (50_000 * 1e6), must be at most total deposit,
+        // AND must leave at least minIdleBufferBps (1000 = 10%) of totalAssets idle.
+        // Max allocation: depositAmount * (10_000 - minIdleBufferBps) / 10_000
+        uint256 maxAlloc = depositAmount * 9_000 / 10_000; // respects 10% idle floor
+        if (maxAlloc > 49_999 * 1e6) maxAlloc = 49_999 * 1e6; // cap at marketA supply cap - 1
+        allocAmount = bound(allocAmount, 0, maxAlloc);
 
         usdc.mint(address(this), depositAmount);
         usdc.approve(address(vault), depositAmount);
@@ -1311,6 +1316,233 @@ contract VaultSentinelTest is Test {
         // Additional sanity: the stored value is bps-scale (>=100 for any non-trivial idle)
         // A 40% idle buffer should be 4000 bps, not 40 (old integer percent)
         assertGe(history[0].idleBps, 100, "idleBps must be bps-scale, not integer-percent-scale");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  GROUP 18 — D-4 Regression: maxDeposit respects supply caps (AC-4)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Proves D-4 fix: maxDeposit returns 0 when totalAssets() >= totalCap.
+     *
+     *         setUp adds marketA (cap=50k) and marketB (cap=50k) → totalCap=100k.
+     *         After depositing 100k, totalAssets == totalCap, so maxDeposit must be 0.
+     *
+     *         Proves AC-4: maxDeposit returns 0 when vault is at capacity.
+     */
+    function testD4_maxDeposit_returnsZeroWhenAtCap() public {
+        // Deposit exactly up to totalCap (100k USDC = sum of both market caps)
+        usdc.approve(address(vault), 100_000 * 1e6);
+        vault.deposit(100_000 * 1e6, address(this));
+
+        // Proves AC-4: maxDeposit must be 0 when totalAssets == totalCap
+        uint256 available = vault.maxDeposit(address(this));
+        assertEq(available, 0, "D-4 regression: maxDeposit must be 0 when at cap");
+    }
+
+    /**
+     * @notice Proves D-4 fix: maxDeposit returns totalCap - totalAssets when below capacity.
+     *
+     *         After a partial deposit, maxDeposit should equal the remaining headroom.
+     *         Proves AC-4: maxDeposit returns totalCap - totalAssets when below cap.
+     */
+    function testD4_maxDeposit_accountsForExistingAssets() public {
+        uint256 partialDeposit = 30_000 * 1e6;
+        usdc.approve(address(vault), partialDeposit);
+        vault.deposit(partialDeposit, address(this));
+
+        // totalCap = 50k + 50k = 100k; totalAssets ≈ 30k; headroom = 70k
+        uint256 available = vault.maxDeposit(address(this));
+        uint256 totalCap = 100_000 * 1e6; // sum of both market caps from setUp
+        uint256 expectedHeadroom = totalCap - vault.totalAssets();
+
+        // Proves AC-4: maxDeposit == totalCap - totalAssets (within 1 wei rounding)
+        assertApproxEqAbs(available, expectedHeadroom, 1, "D-4 regression: maxDeposit must equal remaining headroom");
+        assertGt(available, 0, "D-4 regression: maxDeposit must be positive when below cap");
+    }
+
+    /**
+     * @notice Proves D-4 fix: deposit reverts when requested amount exceeds maxDeposit.
+     *
+     *         After depositing 100k (at cap), any further deposit must revert.
+     *         Proves AC-4: the DepositExceedsCap error is enforced.
+     */
+    function testD4_deposit_revertsWhenAboveCap() public {
+        // Fill vault to capacity
+        usdc.approve(address(vault), 100_000 * 1e6);
+        vault.deposit(100_000 * 1e6, address(this));
+
+        // Attempt any further deposit — must revert with DepositExceedsCap
+        usdc.mint(address(this), 1 * 1e6);
+        usdc.approve(address(vault), 1 * 1e6);
+        vm.expectRevert(abi.encodeWithSelector(CuratedVault.DepositExceedsCap.selector, 1 * 1e6, 0));
+        vault.deposit(1 * 1e6, address(this));
+    }
+
+    /**
+     * @notice Fuzz: any deposit of amount <= maxDeposit() always succeeds.
+     *
+     *         For any amount within the remaining headroom, deposit must not revert.
+     *         Proves AC-4 and the invariant that maxDeposit is a safe upper bound.
+     *
+     * @param rawAmount Fuzz input that is bounded within safe deposit range.
+     */
+    function testFuzz_maxDeposit_neverExceedsCap(uint256 rawAmount) public {
+        // Start with a partial deposit so maxDeposit is bounded and positive
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        uint256 available = vault.maxDeposit(address(this));
+        // Bound fuzz input to [1, available] to test that valid amounts succeed
+        uint256 amount = bound(rawAmount, 1, available > 0 ? available : 1);
+
+        if (available == 0) {
+            // At cap — nothing more to test
+            return;
+        }
+
+        // Mint and approve the exact amount
+        usdc.mint(address(this), amount);
+        usdc.approve(address(vault), amount);
+
+        // Must not revert — amount is within maxDeposit()
+        uint256 shares = vault.deposit(amount, address(this));
+        // Proves AC-4: deposit within maxDeposit always mints > 0 shares
+        assertGt(shares, 0, "fuzz: deposit within maxDeposit must mint shares");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  GROUP 19 — D-7 Regression: minIdleBufferBps idle floor (AC-7 / I-3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Proves D-7 fix: allocating too much reverts when it would breach the idle floor.
+     *
+     *         With minIdleBufferBps = 2000 (20%) and 10k deposited, allocating 9k
+     *         would leave 1k idle (10% = 1000 bps < 2000 bps floor). Must revert.
+     *
+     *         Proves I-3: idleBuffer >= minIdleBufferBps after any allocation.
+     */
+    function testD7_allocate_revertsWhenBreachesIdleFloor() public {
+        // Set floor to 20%
+        vm.prank(curator);
+        vault.setMinIdleBufferBps(2_000);
+
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        // 9000 allocation would leave 1000/10000 = 10% idle < 20% floor
+        vm.prank(allocator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CuratedVault.IdleFloorBreached.selector,
+                1_000, // actualIdleBps: 1000/10000 = 1000 bps
+                2_000 // requiredBps: 2000
+            )
+        );
+        vault.allocate(address(marketA), 9_000 * 1e6);
+
+        // Proves I-3: vault state is unchanged after revert
+        assertEq(vault.idleBufferBps(), 10_000, "D-7: vault must be fully idle after revert");
+    }
+
+    /**
+     * @notice Proves D-7 fix: allocating exactly to the floor succeeds (boundary condition).
+     *
+     *         With minIdleBufferBps = 2000 (20%) and 10k deposited, allocating exactly
+     *         8k leaves 2k idle (20% = 2000 bps == floor). Must succeed.
+     *
+     *         Proves I-3: allocation that lands exactly at the floor is valid.
+     */
+    function testD7_allocate_succeedsAtExactFloor() public {
+        // Set floor to 20%
+        vm.prank(curator);
+        vault.setMinIdleBufferBps(2_000);
+
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        // 8000 allocation leaves 2000/10000 = 20% idle == floor. Must succeed.
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+
+        // Proves I-3: idle is exactly at the floor
+        uint256 idleBps = vault.idleBufferBps();
+        assertGe(idleBps, 2_000, "D-7: idle must be >= floor after allocation at boundary");
+    }
+
+    /**
+     * @notice Proves D-7 fix: setMinIdleBufferBps is restricted to CURATOR_ROLE.
+     *
+     *         Any non-curator call must revert.
+     *         Proves AC-7 role gating.
+     */
+    function testD7_setMinIdleBufferBps_curatorOnly() public {
+        // Attacker cannot set the floor
+        vm.prank(attacker);
+        vm.expectRevert();
+        vault.setMinIdleBufferBps(500);
+
+        // Allocator cannot set the floor
+        vm.prank(allocator);
+        vm.expectRevert();
+        vault.setMinIdleBufferBps(500);
+
+        // Curator can set the floor
+        vm.prank(curator);
+        vault.setMinIdleBufferBps(500);
+        assertEq(vault.minIdleBufferBps(), 500, "D-7: curator must be able to set floor");
+    }
+
+    /**
+     * @notice Proves D-7 fix: setting minIdleBufferBps > 5000 reverts.
+     *
+     *         The maximum allowed floor is MAX_IDLE_FLOOR_BPS = 5000 (50%).
+     *         Setting 5001 bps must revert.
+     *         Proves AC-7 max bound.
+     */
+    function testD7_setMinIdleBufferBps_maxFiftyPercent() public {
+        // 5000 (50%) is the maximum — must succeed
+        vm.prank(curator);
+        vault.setMinIdleBufferBps(5_000);
+        assertEq(vault.minIdleBufferBps(), 5_000, "D-7: 5000 bps must be accepted");
+
+        // 5001 (50.01%) exceeds maximum — must revert
+        vm.prank(curator);
+        vm.expectRevert();
+        vault.setMinIdleBufferBps(5_001);
+
+        // Floor unchanged after failed set
+        assertEq(vault.minIdleBufferBps(), 5_000, "D-7: floor must be unchanged after failed set");
+    }
+
+    /**
+     * @notice Proves D-7 fix: at 0 bps the floor is disabled — full allocation succeeds.
+     *
+     *         With minIdleBufferBps = 0, the allocator can move all funds to markets.
+     *         Proves AC-7: at 0 bps, no revert even at 0 idle.
+     *
+     * @dev    Note: allocating exactly the deposit amount may not be possible due to
+     *         market balance growth and the supply cap check. We allocate up to the cap.
+     */
+    function testD7_idleFloor_disabledAtZero() public {
+        // Disable the floor
+        vm.prank(curator);
+        vault.setMinIdleBufferBps(0);
+        assertEq(vault.minIdleBufferBps(), 0, "floor must be 0 after set");
+
+        // Deposit 10k, allocate 9k to A and 1k to B (90% + 10% = 100%)
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        vm.startPrank(allocator);
+        vault.allocate(address(marketA), 9_000 * 1e6);
+        // Allocate the remaining 1k to market B — leaves 0 idle
+        vault.allocate(address(marketB), 1_000 * 1e6);
+        vm.stopPrank();
+
+        // Proves AC-7: at 0 bps, 0 idle is allowed — no revert
+        assertEq(vault.idleBufferBps(), 0, "D-7: at 0 bps floor, 0% idle must be allowed");
     }
 
     receive() external payable {}

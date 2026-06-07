@@ -182,6 +182,23 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     bool public depositsPaused;
     uint256 private _lastTA; // totalAssets snapshot for fee accrual
 
+    /// @notice Minimum fraction of vault assets that must remain idle (unallocated), in bps.
+    ///         1% = 100 bps, 100% = 10_000 bps.
+    ///         Default: 1000 (10%). Set to 0 to disable the floor entirely.
+    ///         Maximum: 5000 (50%). Settable by CURATOR_ROLE only.
+    ///         Fixes D-7: enforced on every allocate() call.
+    uint256 public minIdleBufferBps = 1_000;
+
+    /// @notice Maximum allowed minIdleBufferBps (50%). Prevents curator from locking > half the vault idle.
+    uint256 public constant MAX_IDLE_FLOOR_BPS = 5_000;
+
+    // ── Custom Errors ─────────────────────────────────────────────────
+    /// @dev Reverts when an allocation would drop idle below minIdleBufferBps.
+    error IdleFloorBreached(uint256 actualIdleBps, uint256 requiredBps);
+
+    /// @dev Reverts when a deposit would exceed the sum of all market supply caps.
+    error DepositExceedsCap(uint256 requested, uint256 available);
+
     // ── Events ───────────────────────────────────────────────────────
     event Deposited(address indexed caller, address indexed rcv, uint256 assets, uint256 shares);
     event Redeemed(address indexed caller, address indexed rcv, address indexed owner, uint256 assets, uint256 shares);
@@ -196,6 +213,8 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     event FeeMinted(address indexed to, uint256 shares, uint256 gain);
     event TimelockUpdated(uint256 d);
     event FeeUpdated(uint256 bps);
+    /// @dev Emitted when the minimum idle buffer floor is changed.
+    event MinIdleBufferBpsSet(uint256 newBps);
 
     // ── Constructor ──────────────────────────────────────────────────
     constructor(
@@ -223,6 +242,13 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
         require(!depositsPaused, "deposits paused");
         require(assets > 0, "zero assets");
         require(receiver != address(0), "zero receiver");
+        // D-4 fix: cap check — deposit must not exceed available headroom in supply caps
+        {
+            uint256 available = maxDeposit(receiver);
+            if (assets > available) {
+                revert DepositExceedsCap(assets, available);
+            }
+        }
         _accruePerformanceFee();
         shares = _toShares(assets);
         require(shares > 0, "zero shares");
@@ -248,7 +274,44 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
 
     // ── ERC-4626 views ───────────────────────────────────────────────
 
-    /// @notice Sum of ALL USDC controlled by vault (idle + all markets).
+    /// @notice Maximum amount of assets that can be deposited without exceeding the
+    ///         sum of all enabled market supply caps.
+    ///
+    ///         Returns max(0, totalCap - totalAssets()) where
+    ///         totalCap = sum(markets[m].supplyCap for all enabled markets).
+    ///
+    ///         When totalAssets() >= totalCap, returns 0 (vault is at capacity).
+    ///         The `receiver` parameter is included for ERC-4626 compatibility but
+    ///         is not used — the cap applies globally, not per-user.
+    ///
+    /// @dev    Fixes D-4: previously returned type(uint256).max, which allowed
+    ///         deposits that could not be allocated to any market.
+    function maxDeposit(
+        address /* receiver */
+    )
+        public
+        view
+        returns (uint256)
+    {
+        uint256 totalCap;
+        uint256 n = _mlist.length;
+        for (uint256 i; i < n;) {
+            address m = _mlist[i];
+            if (markets[m].enabled) {
+                totalCap += markets[m].supplyCap;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        uint256 ta = totalAssets();
+        if (ta >= totalCap) {
+            return 0;
+        }
+        return totalCap - ta;
+    }
+
+    /// @notice Sum of ALL assets controlled by vault (idle + all markets).
     ///         Share price = totalAssets / totalSupply.  Single source of truth.
     function totalAssets() public view returns (uint256) {
         uint256 t = asset.balanceOf(address(this));
@@ -284,8 +347,21 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
         require(cfg.enabled, "market disabled");
         require(ILendingMarket(market).balanceOf(address(this)) + amount <= cfg.supplyCap, "cap exceeded");
         require(asset.balanceOf(address(this)) >= amount, "insufficient idle");
+        // CEI: approve + supply (interaction), then check post-condition
         asset.approve(market, amount);
         ILendingMarket(market).supply(amount);
+        // D-7 fix: enforce minimum idle buffer after allocation (I-3)
+        // Skip when minIdleBufferBps == 0 (floor disabled) or totalAssets == 0
+        if (minIdleBufferBps > 0) {
+            uint256 ta = totalAssets();
+            if (ta > 0) {
+                uint256 idleBal = asset.balanceOf(address(this));
+                uint256 actualIdleBps = idleBal * 10_000 / ta;
+                if (actualIdleBps < minIdleBufferBps) {
+                    revert IdleFloorBreached(actualIdleBps, minIdleBufferBps);
+                }
+            }
+        }
         emit Allocated(market, amount);
     }
 
@@ -375,6 +451,22 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════
     //  CURATOR – CONFIG
     // ═══════════════════════════════════════════════════════════════
+
+    /// @notice Set the minimum idle buffer floor in basis points.
+    ///         After any allocation, idle assets as a fraction of totalAssets must be >= newBps.
+    ///         Set to 0 to disable the floor entirely.
+    ///         Maximum allowed value: MAX_IDLE_FLOOR_BPS (5000 = 50%).
+    ///
+    /// @dev    Fixes D-7. Enforces I-3. Risk-increasing changes (raising the floor) are
+    ///         immediate since raising the floor is risk-reducing for depositors.
+    ///         Only CURATOR_ROLE may call this function.
+    ///
+    /// @param newBps  New minimum idle buffer in bps. Must be <= MAX_IDLE_FLOOR_BPS.
+    function setMinIdleBufferBps(uint256 newBps) external onlyRole(CURATOR_ROLE) {
+        require(newBps <= MAX_IDLE_FLOOR_BPS, "idle floor too high");
+        minIdleBufferBps = newBps;
+        emit MinIdleBufferBpsSet(newBps);
+    }
 
     function setTimelock(uint256 d) external onlyRole(CURATOR_ROLE) {
         require(d >= MIN_TIMELOCK && d <= MAX_TIMELOCK, "bad delay");
