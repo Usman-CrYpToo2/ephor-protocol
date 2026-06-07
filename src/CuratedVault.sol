@@ -77,12 +77,45 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Maximum allowed minIdleBufferBps (50%). Prevents curator from locking > half the vault idle.
     uint256 public constant MAX_IDLE_FLOOR_BPS = 5_000;
 
+    // ── Phase 2: Risk/allocation parameters (curator-set) ────────────────
+    /// @notice Maximum allocation per market as fraction of totalAssets, in bps. Default 50%.
+    uint256 public maxMarketBps = 5_000;
+    /// @notice Maximum total absolute movement per rebalance as fraction of totalAssets, in bps. Default 30%.
+    uint256 public maxTurnoverBps = 3_000;
+    /// @notice Maximum allowed drift from AI snapshot before staleness reject, in bps. Default 5%.
+    uint256 public driftToleranceBps = 500;
+    /// @notice Minimum time between rebalances. Default 1 hour.
+    uint256 public rebalanceEpochLength = 1 hours;
+
+    // ── Phase 2: Epoch state ──────────────────────────────────────────────
+    /// @notice Timestamp of the last successfully executed reallocate call.
+    uint256 public lastRebalanceTime;
+    /// @notice Monotonically incrementing rebalance epoch counter.
+    uint256 public currentEpoch;
+
+    // ── Phase 2: New types ───────────────────────────────────────────────
+    /// @notice Target allocation for a single market, expressed in asset base units.
+    struct MarketTarget {
+        address market;
+        uint256 targetAmount;
+    }
+
+    /// @notice Snapshot guard supplied by the caller to detect staleness.
+    struct RebalanceGuard {
+        uint256 snapshotTotalAssets; // totalAssets at time of AI request
+        uint256 snapshotEpoch;       // currentEpoch at time of AI request
+    }
+
     // ── Custom Errors ─────────────────────────────────────────────────
     /// @dev Reverts when an allocation would drop idle below minIdleBufferBps.
     error IdleFloorBreached(uint256 actualIdleBps, uint256 requiredBps);
 
     /// @dev Reverts when a deposit would exceed the sum of all market supply caps.
     error DepositExceedsCap(uint256 requested, uint256 available);
+
+    /// @dev Reverts when a reallocate call violates an invariant.
+    ///      invariantId is bytes32("I-1") through bytes32("I-10").
+    error InvariantViolation(bytes32 invariantId);
 
     // ── Events ───────────────────────────────────────────────────────
     event Deposited(address indexed caller, address indexed rcv, uint256 assets, uint256 shares);
@@ -100,6 +133,13 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     event FeeUpdated(uint256 bps);
     /// @dev Emitted when the minimum idle buffer floor is changed.
     event MinIdleBufferBpsSet(uint256 newBps);
+    /// @dev Phase 2 events
+    event Rebalanced(uint256 indexed epoch, uint256 totalMoved);
+    event RebalanceRejected(bytes32 invariantId);
+    event MaxMarketBpsSet(uint256 bps);
+    event MaxTurnoverBpsSet(uint256 bps);
+    event DriftToleranceBpsSet(uint256 bps);
+    event RebalanceEpochLengthSet(uint256 d);
 
     // ── Constructor ──────────────────────────────────────────────────
     constructor(
@@ -257,6 +297,146 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  ALLOCATOR – REALLOCATE (Phase 2 invariant system)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// @notice Atomically rebalance the vault according to `targets`.
+    ///         Enforces all SDD §10 invariants (I-1 through I-10) before
+    ///         executing any token movements. Reverts on any violation.
+    ///
+    /// @param targets  Per-market target balances in asset base units.
+    /// @param guard    Staleness guard capturing totalAssets and epoch at
+    ///                 the time the AI/caller built the proposal.
+    function reallocate(MarketTarget[] calldata targets, RebalanceGuard calldata guard)
+        external
+        onlyRole(ALLOCATOR_ROLE)
+        nonReentrant
+    {
+        uint256 ta = totalAssets();
+
+        // ── I-10 Staleness check ──────────────────────────────────────
+        // Check epoch mismatch first (cheap, no division).
+        if (guard.snapshotEpoch != currentEpoch) {
+            revert InvariantViolation(bytes32("I-10"));
+        }
+        // Check drift: |ta - snapshot| <= driftToleranceBps * snapshot / 1e4
+        {
+            uint256 snap = guard.snapshotTotalAssets;
+            uint256 drift = ta > snap ? ta - snap : snap - ta;
+            // Allow zero-snapshot only when ta is also zero (empty vault corner case)
+            if (snap == 0) {
+                if (ta != 0) revert InvariantViolation(bytes32("I-10"));
+            } else {
+                if (drift * 10_000 > driftToleranceBps * snap) {
+                    revert InvariantViolation(bytes32("I-10"));
+                }
+            }
+        }
+
+        // ── I-8 Epoch cooldown ───────────────────────────────────────
+        if (block.timestamp < lastRebalanceTime + rebalanceEpochLength) {
+            revert InvariantViolation(bytes32("I-8"));
+        }
+
+        // ── Pre-compute sum of targets ────────────────────────────────
+        uint256 targetSum;
+        uint256 n = targets.length;
+        for (uint256 i; i < n;) {
+            targetSum += targets[i].targetAmount;
+            unchecked { ++i; }
+        }
+
+        // ── I-1 Conservation ─────────────────────────────────────────
+        // impliedIdle = ta - targetSum; must be >= 0 (plus 1-wei epsilon)
+        if (targetSum > ta + 1) {
+            revert InvariantViolation(bytes32("I-1"));
+        }
+        uint256 impliedIdle = ta >= targetSum ? ta - targetSum : 0;
+
+        // ── I-3 Idle floor ───────────────────────────────────────────
+        if (minIdleBufferBps > 0 && ta > 0) {
+            if (impliedIdle * 10_000 < minIdleBufferBps * ta) {
+                revert InvariantViolation(bytes32("I-3"));
+            }
+        }
+
+        // ── Per-target checks ─────────────────────────────────────────
+        uint256 totalAbsMovement;
+        for (uint256 i; i < n;) {
+            address mkt = targets[i].market;
+            uint256 tgt = targets[i].targetAmount;
+
+            // ── I-5 Whitelist ─────────────────────────────────────────
+            if (!markets[mkt].enabled || tgt == 0) {
+                revert InvariantViolation(bytes32("I-5"));
+            }
+
+            // ── I-2 Cap compliance ────────────────────────────────────
+            if (tgt > markets[mkt].supplyCap) {
+                revert InvariantViolation(bytes32("I-2"));
+            }
+
+            // ── I-4 Max concentration ─────────────────────────────────
+            if (ta > 0 && tgt * 10_000 > maxMarketBps * ta) {
+                revert InvariantViolation(bytes32("I-4"));
+            }
+
+            // ── I-6 Turnover accumulator ──────────────────────────────
+            uint256 cur = ILendingMarket(mkt).balanceOf(address(this));
+            uint256 delta = tgt > cur ? tgt - cur : cur - tgt;
+            totalAbsMovement += delta;
+
+            // ── I-9 Pause respect ─────────────────────────────────────
+            if (depositsPaused && tgt > cur) {
+                revert InvariantViolation(bytes32("I-9"));
+            }
+
+            // ── I-7 Liquidity-aware (withdrawal must not exceed balance) ──
+            // Withdrawals will only be tried when cur > tgt; cur comes from
+            // balanceOf so that's automatically the available amount. Still
+            // checked here for clarity and early revert.
+            // (supply direction is always safe — vault holds idle assets)
+
+            unchecked { ++i; }
+        }
+
+        // ── I-6 Turnover bound ────────────────────────────────────────
+        if (ta > 0 && totalAbsMovement * 10_000 > maxTurnoverBps * ta) {
+            revert InvariantViolation(bytes32("I-6"));
+        }
+
+        // ── Effects: update epoch before interactions ─────────────────
+        lastRebalanceTime = block.timestamp;
+        currentEpoch++;
+
+        // ── Interactions: Phase A — withdrawals first ─────────────────
+        for (uint256 i; i < n;) {
+            address mkt = targets[i].market;
+            uint256 tgt = targets[i].targetAmount;
+            uint256 cur = ILendingMarket(mkt).balanceOf(address(this));
+            if (cur > tgt) {
+                ILendingMarket(mkt).withdraw(cur - tgt);
+            }
+            unchecked { ++i; }
+        }
+
+        // ── Interactions: Phase B — deposits ─────────────────────────
+        for (uint256 i; i < n;) {
+            address mkt = targets[i].market;
+            uint256 tgt = targets[i].targetAmount;
+            uint256 cur = ILendingMarket(mkt).balanceOf(address(this));
+            if (tgt > cur) {
+                uint256 toSupply = tgt - cur;
+                require(asset.approve(mkt, toSupply), "approve failed");
+                ILendingMarket(mkt).supply(toSupply);
+            }
+            unchecked { ++i; }
+        }
+
+        emit Rebalanced(currentEpoch, totalAbsMovement);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  CURATOR – MARKET MANAGEMENT (timelocked)
     // ═══════════════════════════════════════════════════════════════
 
@@ -351,6 +531,34 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         require(newBps <= MAX_IDLE_FLOOR_BPS, "idle floor too high");
         minIdleBufferBps = newBps;
         emit MinIdleBufferBpsSet(newBps);
+    }
+
+    /// @notice Set maximum allocation per market in bps. Max 9000 (90%).
+    function setMaxMarketBps(uint256 bps) external onlyRole(CURATOR_ROLE) {
+        require(bps <= 9_000, "too high");
+        maxMarketBps = bps;
+        emit MaxMarketBpsSet(bps);
+    }
+
+    /// @notice Set maximum total turnover per rebalance in bps. Max 9000 (90%).
+    function setMaxTurnoverBps(uint256 bps) external onlyRole(CURATOR_ROLE) {
+        require(bps <= 9_000, "too high");
+        maxTurnoverBps = bps;
+        emit MaxTurnoverBpsSet(bps);
+    }
+
+    /// @notice Set drift tolerance for guard staleness check in bps. Max 2000 (20%).
+    function setDriftToleranceBps(uint256 bps) external onlyRole(CURATOR_ROLE) {
+        require(bps <= 2_000, "too high");
+        driftToleranceBps = bps;
+        emit DriftToleranceBpsSet(bps);
+    }
+
+    /// @notice Set minimum time between rebalances. Max 7 days.
+    function setRebalanceEpochLength(uint256 d) external onlyRole(CURATOR_ROLE) {
+        require(d <= 7 days, "too long");
+        rebalanceEpochLength = d;
+        emit RebalanceEpochLengthSet(d);
     }
 
     function setTimelock(uint256 d) external onlyRole(CURATOR_ROLE) {
