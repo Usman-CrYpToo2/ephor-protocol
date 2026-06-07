@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ILendingMarket} from "./Interface/ILendingMarket.sol";
+
 /**
  * @title  CuratedVault
  * @notice ERC-4626 tokenised yield vault.
@@ -21,133 +27,12 @@ pragma solidity ^0.8.20;
  *  • Timelocked market additions (curator cannot instantly add bad markets)
  *  • Sentinel can only REDUCE risk — cannot add markets or move funds out
  */
-
-interface IERC20 {
-    function balanceOf(address) external view returns (uint256);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address f, address t, uint256 a) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
-}
-
-interface ILendingMarket {
-    function supply(uint256 amount) external;
-    function withdraw(uint256 amount) external;
-    function balanceOf(address account) external view returns (uint256);
-    function utilizationBps() external view returns (uint256);
-}
-
-// ── Minimal inline ERC-20 (shares token) ────────────────────────────────────
-abstract contract ERC20Base {
-    string public name;
-    string public symbol;
-    uint8 public constant decimals = 18;
-
-    uint256 public totalSupply;
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    event Transfer(address indexed from, address indexed to, uint256 v);
-    event Approval(address indexed owner, address indexed spender, uint256 v);
-
-    constructor(string memory _n, string memory _s) {
-        name = _n;
-        symbol = _s;
-    }
-
-    function transfer(address to, uint256 v) external returns (bool) {
-        _transfer(msg.sender, to, v);
-        return true;
-    }
-
-    function approve(address sp, uint256 v) external returns (bool) {
-        allowance[msg.sender][sp] = v;
-        emit Approval(msg.sender, sp, v);
-        return true;
-    }
-
-    function transferFrom(address f, address t, uint256 v) external returns (bool) {
-        _spend(f, msg.sender, v);
-        _transfer(f, t, v);
-        return true;
-    }
-
-    function _transfer(address f, address t, uint256 v) internal {
-        require(t != address(0) && balanceOf[f] >= v, "ERC20: transfer");
-        balanceOf[f] -= v;
-        balanceOf[t] += v;
-        emit Transfer(f, t, v);
-    }
-
-    function _mint(address t, uint256 v) internal {
-        require(t != address(0), "ERC20: mint zero");
-        totalSupply += v;
-        balanceOf[t] += v;
-        emit Transfer(address(0), t, v);
-    }
-
-    function _burn(address f, uint256 v) internal {
-        require(balanceOf[f] >= v, "ERC20: burn");
-        balanceOf[f] -= v;
-        totalSupply -= v;
-        emit Transfer(f, address(0), v);
-    }
-
-    function _spend(address o, address sp, uint256 v) internal {
-        uint256 a = allowance[o][sp];
-        if (a != type(uint256).max) require(a >= v, "ERC20: allowance");
-        allowance[o][sp] = a - v;
-    }
-}
-
-// ── Inline AccessControl ─────────────────────────────────────────────────────
-abstract contract AccessControl {
-    bytes32 public constant DEFAULT_ADMIN_ROLE = bytes32(0);
+contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
+    // ── Role constants ────────────────────────────────────────────────
     bytes32 public constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
     bytes32 public constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
     bytes32 public constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
 
-    mapping(bytes32 => mapping(address => bool)) private _r;
-
-    event RoleGranted(bytes32 indexed role, address indexed account);
-    event RoleRevoked(bytes32 indexed role, address indexed account);
-
-    modifier onlyRole(bytes32 role) {
-        require(_r[role][msg.sender], "missing role");
-        _;
-    }
-
-    function hasRole(bytes32 role, address a) public view returns (bool) {
-        return _r[role][a];
-    }
-
-    function grantRole(bytes32 role, address a) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _r[role][a] = true;
-        emit RoleGranted(role, a);
-    }
-
-    function revokeRole(bytes32 role, address a) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _r[role][a] = false;
-        emit RoleRevoked(role, a);
-    }
-
-    function _setupRole(bytes32 role, address a) internal {
-        _r[role][a] = true;
-    }
-}
-
-// ── Inline ReentrancyGuard ───────────────────────────────────────────────────
-abstract contract ReentrancyGuard {
-    uint256 private _s = 1;
-    modifier nonReentrant() {
-        require(_s == 1, "reentrant");
-        _s = 2;
-        _;
-        _s = 1;
-    }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // ERC-4626 inflation-attack protection offsets
     uint256 private constant VSHARES = 1;
     uint256 private constant VASSETS = 1;
@@ -225,13 +110,13 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
         address _curator,
         address _allocator,
         address _feeRecipient
-    ) ERC20Base(_name, _symbol) {
+    ) ERC20(_name, _symbol) {
         require(_asset != address(0) && _admin != address(0) && _feeRecipient != address(0), "zero addr");
         asset = IERC20(_asset);
         feeRecipient = _feeRecipient;
-        _setupRole(DEFAULT_ADMIN_ROLE, _admin);
-        _setupRole(CURATOR_ROLE, _curator);
-        _setupRole(ALLOCATOR_ROLE, _allocator);
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        _grantRole(CURATOR_ROLE, _curator);
+        _grantRole(ALLOCATOR_ROLE, _allocator);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -260,8 +145,8 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
 
     function redeem(uint256 shares, address receiver, address owner_) external nonReentrant returns (uint256 assets) {
         require(shares > 0 && receiver != address(0), "bad args");
-        require(balanceOf[owner_] >= shares, "insufficient shares");
-        if (msg.sender != owner_) _spend(owner_, msg.sender, shares);
+        require(balanceOf(owner_) >= shares, "insufficient shares");
+        if (msg.sender != owner_) _spendAllowance(owner_, msg.sender, shares);
         _accruePerformanceFee();
         assets = _toAssets(shares);
         require(assets > 0, "zero assets out");
@@ -335,7 +220,7 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     }
 
     function sharePrice() external view returns (uint256) {
-        return (totalAssets() + VASSETS) * 1e18 / (totalSupply + VSHARES);
+        return (totalAssets() + VASSETS) * 1e18 / (totalSupply() + VSHARES);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -525,11 +410,11 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════
 
     function _toShares(uint256 a) internal view returns (uint256) {
-        return a * (totalSupply + VSHARES) / (totalAssets() + VASSETS);
+        return a * (totalSupply() + VSHARES) / (totalAssets() + VASSETS);
     }
 
     function _toAssets(uint256 s) internal view returns (uint256) {
-        return s * (totalAssets() + VASSETS) / (totalSupply + VSHARES);
+        return s * (totalAssets() + VASSETS) / (totalSupply() + VSHARES);
     }
 
     function _ensureLiquidity(uint256 needed) internal {
@@ -555,13 +440,13 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
 
     function _accruePerformanceFee() internal {
         uint256 cur = totalAssets();
-        if (cur <= _lastTA || totalSupply == 0 || performanceFeeBps == 0) {
+        if (cur <= _lastTA || totalSupply() == 0 || performanceFeeBps == 0) {
             _lastTA = cur;
             return;
         }
         uint256 gain = cur - _lastTA;
         uint256 feeA = gain * performanceFeeBps / 10_000;
-        uint256 feeShares = feeA * (totalSupply + VSHARES) / (cur + VASSETS);
+        uint256 feeShares = feeA * (totalSupply() + VSHARES) / (cur + VASSETS);
         if (feeShares > 0) _mint(feeRecipient, feeShares);
         emit FeeMinted(feeRecipient, feeShares, gain);
         _lastTA = cur;

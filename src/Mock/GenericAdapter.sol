@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../Interface/IMarketAdapter.sol";
+import {IMarketAdapter} from "../Interface/IMarketAdapter.sol";
+import {ILendingMarketBps} from "../Interface/ILendingMarketBps.sol";
 
 /**
  * @title  GenericAdapter
@@ -25,11 +26,6 @@ import "../Interface/IMarketAdapter.sol";
  *
  *  Satisfies: D-8, I-11, AC-17 (adapters are curator-registered per market).
  */
-
-/// @dev Minimal interface for markets that expose utilizationBps() directly.
-interface ILendingMarketBps {
-    function utilizationBps() external view returns (uint256);
-}
 
 contract GenericAdapter is IMarketAdapter {
     /**

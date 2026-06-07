@@ -929,8 +929,8 @@ contract VaultSentinelTest is Test {
     function testSentinel_transferAdmin() public {
         address newAdmin = address(0x9999);
         vm.prank(admin);
-        sentinel.transferAdmin(newAdmin);
-        assertEq(sentinel.admin(), newAdmin);
+        sentinel.transferOwnership(newAdmin);
+        assertEq(sentinel.owner(), newAdmin);
 
         // Old admin is locked out
         vm.prank(admin);
@@ -939,7 +939,7 @@ contract VaultSentinelTest is Test {
 
         // Restore for downstream tests
         vm.prank(newAdmin);
-        sentinel.transferAdmin(admin);
+        sentinel.transferOwnership(admin);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1047,7 +1047,7 @@ contract VaultSentinelTest is Test {
     function testSentinel_transferZeroAdminReverts() public {
         vm.prank(admin);
         vm.expectRevert();
-        sentinel.transferAdmin(address(0));
+        sentinel.transferOwnership(address(0));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

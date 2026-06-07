@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import "./Interface/ISomnia.sol";
-import {IUtilizationOracle} from "./UtilizationOracle.sol";
+import {IUtilizationOracle} from "./Interface/IUtilizationOracle.sol";
+import {IVault} from "./Interface/IVault.sol";
+import {IMarket} from "./Interface/IMarket.sol";
 
 /**
  * @title  VaultSentinel
@@ -53,32 +56,9 @@ import {IUtilizationOracle} from "./UtilizationOracle.sol";
  *  • handleResponse name MUST NOT change — selector passed to createRequest literally
  */
 
-// ── External vault interface ──────────────────────────────────────────────────
-
-interface IVault {
-    function totalAssets() external view returns (uint256);
-    /// @dev Returns idle fraction in bps (1% = 100 bps). Fixes D-3.
-    function idleBufferBps() external view returns (uint256);
-    /// @dev Returns market allocation fraction in bps. Fixes D-3.
-    function marketAllocationBps(address market) external view returns (uint256);
-    function marketCount() external view returns (uint256);
-    function marketList(uint256 i) external view returns (address);
-    function pauseDeposits() external;
-    function emergencyDeallocate(address market, uint256 amount) external;
-}
-
-// ── Market spot interface (fallback when no oracle) ───────────────────────────
-
-interface IMarket {
-    function balanceOf(address account) external view returns (uint256);
-    function utilizationBps() external view returns (uint256);
-}
-
-// ── UtilizationOracle interface (full v2 API) ─────────────────────────────────
-
 // ════════════════════════════════════════════════════════════════════════════
 
-contract VaultSentinel {
+contract VaultSentinel is Ownable {
     // ── Somnia platform ──────────────────────────────────────────────────────
     // Testnet:  0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776
     // Mainnet:  0x5E5205CF39E766118C01636bED000A54D93163E6
@@ -94,7 +74,7 @@ contract VaultSentinel {
     uint256 public constant LLM_COST_PER_AGENT = 0.07 ether;
 
     // ── Admin ────────────────────────────────────────────────────────────────
-    address public admin;
+    // Admin is managed by OZ Ownable: use owner() / transferOwnership().
 
     // ── Utilization oracle ────────────────────────────────────────────────────
     /// @notice TWAP oracle for manipulation-resistant utilization readings (D-8).
@@ -179,7 +159,6 @@ contract VaultSentinel {
     event VaultPausedByAI(address indexed vault, string reason);
     event EmergencyDeallocated(address indexed vault, address indexed market, uint256 amount);
     event AgentIdSet(uint256 newId);
-    event AdminTransferred(address newAdmin);
     /// @notice Emitted when the utilization oracle address is changed.
     event OracleSet(address indexed newOracle);
     /// @notice Emitted when AI response was ignored because consensus threshold was not met (D-6).
@@ -194,16 +173,11 @@ contract VaultSentinel {
         require(msg.sender == address(platform), "Sentinel: not platform");
         _;
     }
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Sentinel: not admin");
-        _;
-    }
 
-    constructor(address _platform, uint256 _llmAgentId, address _admin) {
-        require(_platform != address(0) && _admin != address(0), "zero addr");
+    constructor(address _platform, uint256 _llmAgentId, address _admin) Ownable(_admin) {
+        require(_platform != address(0), "zero platform");
         platform = IAgentRequester(_platform);
         llmAgentId = _llmAgentId;
-        admin = _admin;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -714,7 +688,7 @@ contract VaultSentinel {
     // ════════════════════════════════════════════════════════════════════════
 
     /// @notice Register a vault for monitoring.
-    function registerVault(address vault, bool autoPause) external onlyAdmin {
+    function registerVault(address vault, bool autoPause) external onlyOwner {
         require(vault != address(0), "zero vault");
         require(!vaultInfo[vault].registered, "already registered");
         vaultInfo[vault] = VaultInfo(true, autoPause, RiskLevel.Safe, 0, 0, 0);
@@ -723,7 +697,7 @@ contract VaultSentinel {
     }
 
     /// @notice Update the LLM agent ID (from agents.somnia.network).
-    function setLlmAgentId(uint256 newId) external onlyAdmin {
+    function setLlmAgentId(uint256 newId) external onlyOwner {
         llmAgentId = newId;
         emit AgentIdSet(newId);
     }
@@ -736,16 +710,9 @@ contract VaultSentinel {
      * @dev    Resolves D-8.  Only the sentinel admin may call this.
      * @param  newOracle  Address of IUtilizationOracle implementation, or address(0).
      */
-    function setOracle(address newOracle) external onlyAdmin {
+    function setOracle(address newOracle) external onlyOwner {
         oracle = IUtilizationOracle(newOracle);
         emit OracleSet(newOracle);
-    }
-
-    /// @notice Transfer sentinel admin to a new address.
-    function transferAdmin(address newAdmin) external onlyAdmin {
-        require(newAdmin != address(0), "zero");
-        admin = newAdmin;
-        emit AdminTransferred(newAdmin);
     }
 
     // ════════════════════════════════════════════════════════════════════════

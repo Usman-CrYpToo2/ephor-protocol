@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 /// @title  MockLendingMarket
 /// @notice Simulates an Aave/Morpho-style single-asset lending market.
 ///         Compounds interest per-second at 5% APY using binary-exp math.
@@ -10,19 +12,13 @@ pragma solidity ^0.8.20;
 ///         - setUtilization(pct)  – set borrow utilization 0-100 for AI demo
 ///         - fastForwardDays(n)   – advance interest index as if n days passed
 
-interface IERC20M {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-}
-
 contract MockLendingMarket {
     // 5 % APY as per-second compound rate in 1e18 fixed-point
     // (1.05)^(1/31536000) ≈ 1 + 1.5471e-9  → 1_000_000_001_547_100_000
     uint256 private constant RATE = 1_000_000_001_547_100_000;
     uint256 private constant ONE = 1e18;
 
-    IERC20M public immutable asset;
+    IERC20 public immutable asset;
     address public immutable vault;
     string public name;
 
@@ -59,7 +55,7 @@ contract MockLendingMarket {
 
     constructor(address _asset, address _vault, string memory _name) {
         require(_asset != address(0) && _vault != address(0), "zero addr");
-        asset = IERC20M(_asset);
+        asset = IERC20(_asset);
         vault = _vault;
         name = _name;
         lastAccrualTimestamp = block.timestamp;

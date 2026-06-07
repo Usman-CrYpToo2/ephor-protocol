@@ -1,24 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./Interface/IMarketAdapter.sol";
-
-// ── Backward-compatible interface kept for existing callers ──────────────────
-interface IUtilizationOracle {
-    event SuspiciousSpike(
-        address indexed market,
-        uint256 spot,
-        uint256 twapVal,
-        uint256 delta,
-        uint256 timestamp
-    );
-
-    function update(address market) external;
-    function twap(address market, uint256 window) external view returns (uint256);
-    function effectiveUtil(address market) external returns (uint256 util, bool spikeDetected);
-    function isValid(address market) external view returns (bool);
-    function lastRecorded(address market) external view returns (uint256 timestamp, uint256 utilBps);
-}
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IMarketAdapter} from "./Interface/IMarketAdapter.sol";
+import {IUtilizationOracle} from "./Interface/IUtilizationOracle.sol";
 
 /**
  * @title  UtilizationOracle
@@ -63,7 +48,7 @@ interface IUtilizationOracle {
  *
  *  Resolves: D-8.  Satisfies: I-11, G-8, P-9, R-10, AC-13..AC-18.
  */
-contract UtilizationOracle is IUtilizationOracle {
+contract UtilizationOracle is IUtilizationOracle, Ownable {
     // ── Constants ─────────────────────────────────────────────────────────────
 
     /// @notice Number of checkpoint slots in the ring buffer per market.
@@ -86,10 +71,6 @@ contract UtilizationOracle is IUtilizationOracle {
 
     /// @notice Above this, secondary rule may fire (use spot despite spike). Default 9500 (95%).
     uint256 public criticalUtilBps;
-
-    // ── Ownership ─────────────────────────────────────────────────────────────
-
-    address public owner;
 
     // ── Adapter registry ──────────────────────────────────────────────────────
 
@@ -120,21 +101,10 @@ contract UtilizationOracle is IUtilizationOracle {
     /// @notice Emitted when an adapter is registered for a market.
     event AdapterRegistered(address indexed market, address indexed adapter);
 
-    /// @notice Emitted when ownership is transferred.
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
-
     // ── Custom Errors ─────────────────────────────────────────────────────────
 
-    error NotOwner();
     error ZeroAddress();
     error NoAdapter(address market);
-
-    // ── Modifiers ─────────────────────────────────────────────────────────────
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -151,13 +121,11 @@ contract UtilizationOracle is IUtilizationOracle {
         uint256 _cautionUtilBps,
         uint256 _criticalUtilBps,
         address _owner
-    ) {
-        if (_owner == address(0)) revert ZeroAddress();
+    ) Ownable(_owner) {
         TWAP_WINDOW = _twapWindow;
         spikeToleranceBps = _spikeToleranceBps;
         cautionUtilBps = _cautionUtilBps;
         criticalUtilBps = _criticalUtilBps;
-        owner = _owner;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -191,16 +159,6 @@ contract UtilizationOracle is IUtilizationOracle {
         spikeToleranceBps = _spikeToleranceBps;
         cautionUtilBps = _cautionUtilBps;
         criticalUtilBps = _criticalUtilBps;
-    }
-
-    /**
-     * @notice Transfer ownership of the oracle.
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert ZeroAddress();
-        address old = owner;
-        owner = newOwner;
-        emit OwnershipTransferred(old, newOwner);
     }
 
     // ════════════════════════════════════════════════════════════════════════
