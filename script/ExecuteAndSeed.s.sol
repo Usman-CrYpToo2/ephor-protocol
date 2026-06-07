@@ -78,15 +78,15 @@ contract ExecuteAndSeed is Script {
 
         // ── Verify expected state ──────────────────────────────────────────────
         uint256 totalAssets = vault.totalAssets();
-        uint256 idlePct = vault.idleBufferPct();
-        uint256 mktAPct = vault.marketAllocationPct(address(marketA));
-        uint256 mktBPct = vault.marketAllocationPct(address(marketB));
+        uint256 idlePct = vault.idleBufferBps();
+        uint256 mktAPct = vault.marketAllocationBps(address(marketA));
+        uint256 mktBPct = vault.marketAllocationBps(address(marketB));
         uint256 mktAUtil = marketA.utilizationBps();
         uint256 mktBUtil = marketB.utilizationBps();
 
         console.log("\n========= VAULT STATE =========");
         console.log("totalAssets (USDC units):  ", totalAssets / 1e6);
-        console.log("idleBufferPct:             ", idlePct, "%");
+        console.log("idleBufferBps:             ", idlePct, "bps");
         console.log("Market A allocation:       ", mktAPct, "%  (CRITICAL threshold: >40%)");
         console.log("Market B allocation:       ", mktBPct, "%");
         console.log("Market A utilization (bps):", mktAUtil, " (CRITICAL threshold: >9500)");

@@ -42,8 +42,10 @@ import "./Interface/ISomnia.sol";
 
 interface IVault {
     function totalAssets() external view returns (uint256);
-    function idleBufferPct() external view returns (uint256);
-    function marketAllocationPct(address market) external view returns (uint256);
+    /// @dev Returns idle fraction in basis points (bps). 1% = 100 bps. Fixes D-3.
+    function idleBufferBps() external view returns (uint256);
+    /// @dev Returns market allocation fraction in basis points (bps). 1% = 100 bps. Fixes D-3.
+    function marketAllocationBps(address market) external view returns (uint256);
     function marketCount() external view returns (uint256);
     function marketList(uint256 i) external view returns (address);
     function pauseDeposits() external;
@@ -97,7 +99,8 @@ contract VaultSentinel {
         RiskLevel level;
         string rawVerdict;
         uint256 totalAssets;
-        uint256 idlePct;
+        /// @dev Idle buffer in basis points (bps). 1% = 100 bps. Renamed from idlePct (D-3 fix).
+        uint256 idleBps;
     }
     mapping(address => RiskSnapshot[]) private _history;
 
@@ -161,15 +164,15 @@ contract VaultSentinel {
         // ── Read all metrics from vault's own contracts (zero external API) ──
         (
             uint256 totalA,
-            uint256 idlePct,
+            uint256 idleBps,
             uint256 mCount,
             address[] memory mAddrs,
-            uint256[] memory mAllocPct,
+            uint256[] memory mAllocBps,
             uint256[] memory mUtilBps
         ) = _readMetrics(vault);
 
         // ── Build user prompt ──────────────────────────────────────────────
-        string memory userPrompt = _buildUserPrompt(totalA, idlePct, mCount, mAddrs, mAllocPct, mUtilBps);
+        string memory userPrompt = _buildUserPrompt(totalA, idleBps, mCount, mAddrs, mAllocBps, mUtilBps);
 
         // ── Encode LLM agent call ──────────────────────────────────────────
         // inferString(prompt, system, chainOfThought, allowedValues)
@@ -300,29 +303,31 @@ contract VaultSentinel {
     //  INTERNAL — READ METRICS (pure on-chain)
     // ════════════════════════════════════════════════════════════════════════
 
+    /// @dev Reads all vault metrics. All ratio values are in basis points (bps).
+    ///      idleBps and mAllocBps are bps (10_000 = 100%). Fixes D-3.
     function _readMetrics(address vault)
         internal
         view
         returns (
             uint256 totalA,
-            uint256 idlePct,
+            uint256 idleBps,
             uint256 mCount,
             address[] memory mAddrs,
-            uint256[] memory mAllocPct,
+            uint256[] memory mAllocBps,
             uint256[] memory mUtilBps
         )
     {
         IVault v = IVault(vault);
         totalA = v.totalAssets();
-        idlePct = v.idleBufferPct();
+        idleBps = v.idleBufferBps();
         mCount = v.marketCount();
         mAddrs = new address[](mCount);
-        mAllocPct = new uint256[](mCount);
+        mAllocBps = new uint256[](mCount);
         mUtilBps = new uint256[](mCount);
         for (uint256 i; i < mCount;) {
             address m = v.marketList(i);
             mAddrs[i] = m;
-            mAllocPct[i] = v.marketAllocationPct(m);
+            mAllocBps[i] = v.marketAllocationBps(m);
             mUtilBps[i] = IMarket(m).utilizationBps();
             unchecked {
                 ++i;
@@ -343,28 +348,22 @@ contract VaultSentinel {
             "If data missing or inconsistent: CAUTION. " "RESPOND WITH ONE WORD ONLY: SAFE, CAUTION, or CRITICAL.";
     }
 
+    /// @dev Builds the LLM user prompt from vault metrics.
+    ///      All ratio values (idleBps, mAllocBps, mUtilBps) are in basis points.
+    ///      10000 bps = 100%. Values are emitted losslessly with no truncation (P-4, D-3).
     function _buildUserPrompt(
         uint256 totalA,
-        uint256 idlePct,
+        uint256 idleBps,
         uint256 mCount,
         address[] memory,
-        uint256[] memory mAllocPct,
+        uint256[] memory mAllocBps,
         uint256[] memory mUtilBps
     ) internal pure returns (string memory s) {
-        s = string(abi.encodePacked("Vault: total=", _u(totalA / 1_000_000), " USDC ", "idle=", _u(idlePct), "%. "));
+        s = string(abi.encodePacked("Vault: total=", _u(totalA / 1_000_000), " idle=", _u(idleBps), "bps. "));
         for (uint256 i; i < mCount;) {
             s = string(
                 abi.encodePacked(
-                    s,
-                    "Market",
-                    _u(i + 1),
-                    ": ",
-                    "alloc=",
-                    _u(mAllocPct[i]),
-                    "% ",
-                    "util=",
-                    _u(mUtilBps[i] / 100),
-                    "%. "
+                    s, "Market", _u(i + 1), ": ", "alloc=", _u(mAllocBps[i]), "bps ", "util=", _u(mUtilBps[i]), "bps. "
                 )
             );
             unchecked {
@@ -388,7 +387,7 @@ contract VaultSentinel {
                 level: level,
                 rawVerdict: verdict,
                 totalAssets: IVault(vault).totalAssets(),
-                idlePct: IVault(vault).idleBufferPct()
+                idleBps: IVault(vault).idleBufferBps()
             })
         );
     }

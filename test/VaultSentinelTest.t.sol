@@ -541,32 +541,36 @@ contract VaultSentinelTest is Test {
     //  GROUP 9 — Vault query helpers (consumed by sentinel)
     // ══════════════════════════════════════════════════════════════════════════
 
-    function testVault_marketAllocationPct() public {
+    // Proves AC-4: all ratio metrics are bps (10_000 = 100%). Fixes D-3.
+    function testVault_marketAllocationBps() public {
         usdc.approve(address(vault), 10_000 * 1e6);
         vault.deposit(10_000 * 1e6, address(this));
         vm.prank(allocator);
         vault.allocate(address(marketA), 6_000 * 1e6);
 
-        uint256 pct = vault.marketAllocationPct(address(marketA));
-        assertApproxEqAbs(pct, 60, 1);
+        // 6000/10000 = 60% = 6000 bps (not 60 as the old integer-percent would return)
+        uint256 bps = vault.marketAllocationBps(address(marketA));
+        assertApproxEqAbs(bps, 6_000, 1); // Proves AC-4: value is in bps, not percent
     }
 
-    function testVault_idleBufferPct() public {
+    // Proves AC-4: idle buffer uses bps precision. Fixes D-3.
+    function testVault_idleBufferBps() public {
         usdc.approve(address(vault), 10_000 * 1e6);
         vault.deposit(10_000 * 1e6, address(this));
         vm.prank(allocator);
         vault.allocate(address(marketA), 9_000 * 1e6);
 
-        uint256 idle = vault.idleBufferPct();
-        assertApproxEqAbs(idle, 10, 1);
+        // 1000/10000 = 10% = 1000 bps (not 10 as the old integer-percent would return)
+        uint256 idle = vault.idleBufferBps();
+        assertApproxEqAbs(idle, 1_000, 1); // Proves AC-4: value is in bps, not percent
     }
 
-    function testVault_marketAllocationPctZeroWhenEmpty() public {
-        assertEq(vault.marketAllocationPct(address(marketA)), 0);
+    function testVault_marketAllocationBpsZeroWhenEmpty() public {
+        assertEq(vault.marketAllocationBps(address(marketA)), 0);
     }
 
-    function testVault_idleBufferPctZeroWhenEmpty() public {
-        assertEq(vault.idleBufferPct(), 0);
+    function testVault_idleBufferBpsZeroWhenEmpty() public {
+        assertEq(vault.idleBufferBps(), 0);
     }
 
     function testMarket_utilizationReflectsSetValue() public {
@@ -1164,6 +1168,149 @@ contract VaultSentinelTest is Test {
 
         // Must return nearly full amount (virtual shares cause ≤1 wei rounding)
         assertGe(returned + 1, depositAmount, "round-trip principal preserved");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  GROUP 17 — D-3 Regression: BPS Precision (AC-4)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Regression for D-3: marketAllocationBps distinguishes 40.5% (4050 bps)
+     *         from 40.0% (4000 bps).
+     *
+     *         The old *100 formula would truncate both to 40, making them
+     *         indistinguishable. The new *10000 formula preserves the difference.
+     *         Proves AC-4: all ratio metrics are bps; no integer-percent path.
+     */
+    function testD3_marketAllocationBps_distinguishes4050From4000() public {
+        // Deposit exactly 10_000 USDC so 1 USDC == 1 bps of totalAssets
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        // Allocate exactly 4050 USDC → 4050/10000 = 40.5% = 4050 bps
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 4_050 * 1e6);
+
+        uint256 bps = vault.marketAllocationBps(address(marketA));
+
+        // Proves AC-4: 40.5% is represented as 4050, not 40
+        assertEq(bps, 4_050, "D-3 regression: 40.5% must be 4050 bps");
+
+        // Explicitly confirm it is NOT equal to 4000 (40.0%)
+        assertTrue(bps != 4_000, "D-3 regression: 40.5% must be distinguishable from 40.0%");
+    }
+
+    /**
+     * @notice Regression for D-3: idleBufferBps distinguishes 40.5% (4050 bps)
+     *         from 40.0% (4000 bps) for the idle buffer.
+     */
+    function testD3_idleBufferBps_distinguishes4050From4000() public {
+        // Deposit exactly 10_000 USDC
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        // Allocate 5950 USDC to marketA → idle = 4050 USDC = 4050 bps
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 5_950 * 1e6);
+
+        uint256 idleBps = vault.idleBufferBps();
+
+        // Proves AC-4: 40.5% idle is 4050 bps, not 40
+        assertEq(idleBps, 4_050, "D-3 regression: idle 40.5% must be 4050 bps");
+
+        // Explicitly confirm it is NOT equal to 4000 (40.0%)
+        assertTrue(idleBps != 4_000, "D-3 regression: idle 40.5% must be distinguishable from 40.0%");
+    }
+
+    /**
+     * @notice Explicitly documents the old bug and the fix.
+     *
+     *         Old code: balanceOf * 100 / totalAssets → truncates 4050 to 40
+     *         New code: balanceOf * 10_000 / totalAssets → returns 4050
+     *
+     *         The first assertion shows WHY the old code was wrong.
+     *         The second assertion shows the fix is correct.
+     */
+    function testD3_oldPctWouldHaveLostPrecision() public {
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 4_050 * 1e6);
+
+        // Simulate what the old *100 formula would have returned:
+        // 4050 USDC * 100 / 10000 USDC = 40 (truncated, losing 0.5%)
+        uint256 marketBal = 4_050 * uint256(1e6);
+        uint256 totalBal = 10_000 * uint256(1e6);
+        uint256 oldStylePct = marketBal * 100 / totalBal;
+        assertEq(oldStylePct, 40, "Documents the old precision loss: 40.5% truncated to 40");
+
+        // The new *10000 formula preserves the precision
+        uint256 newBps = vault.marketAllocationBps(address(marketA));
+        assertEq(newBps, 4_050, "New bps formula returns lossless 4050");
+
+        // Confirm they represent different values (the whole point of D-3)
+        assertTrue(newBps != oldStylePct * 100, "4050 bps != 4000 (which is what 40*100 gives)");
+    }
+
+    /**
+     * @notice Fuzz test: marketAllocationBps is consistent with the underlying balance.
+     *         For any deposit and allocation, bps == balance * 10_000 / totalAssets.
+     *         Proves P-4 (lossless canonical inputs) and AC-4.
+     */
+    function testFuzz_marketAllocationBps_isConsistentWithBalance(uint256 depositAmount, uint256 allocAmount) public {
+        // Bound to realistic vault ranges (1 USDC to 49,999 USDC per market cap)
+        depositAmount = bound(depositAmount, 1_000 * 1e6, 100_000 * 1e6);
+        // Must not exceed supply cap (50_000 * 1e6) and must be at most total deposit
+        allocAmount = bound(allocAmount, 0, depositAmount < 50_000 * 1e6 ? depositAmount : 49_999 * 1e6);
+
+        usdc.mint(address(this), depositAmount);
+        usdc.approve(address(vault), depositAmount);
+        vault.deposit(depositAmount, address(this));
+
+        if (allocAmount > 0) {
+            vm.prank(allocator);
+            vault.allocate(address(marketA), allocAmount);
+        }
+
+        uint256 actualBal = marketA.balanceOf(address(vault));
+        uint256 totalA = vault.totalAssets();
+        uint256 expectedBps = totalA == 0 ? 0 : actualBal * 10_000 / totalA;
+        uint256 reportedBps = vault.marketAllocationBps(address(marketA));
+
+        // Proves P-4: reported bps matches exact arithmetic (within 1 bps rounding)
+        // Proves AC-4: no truncation or precision loss
+        assertApproxEqAbs(reportedBps, expectedBps, 1, "bps must match balance * 10_000 / totalAssets");
+    }
+
+    /**
+     * @notice End-to-end: the sentinel history snapshot stores idleBps (not the old idlePct).
+     *         After a checkVault+SAFE callback, the stored snapshot's idleBps field
+     *         equals vault.idleBufferBps() at snapshot time. Proves the struct rename is
+     *         correct and the field stores bps values end-to-end.
+     */
+    function testD3_sentinelHistoryStoresIdleBps() public {
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 6_000 * 1e6);
+
+        // Record current idleBufferBps before the check
+        uint256 expectedIdleBps = vault.idleBufferBps();
+        // 4000 USDC idle / 10000 USDC total = 4000 bps (40%)
+        assertEq(expectedIdleBps, 4_000, "precondition: idle should be 4000 bps");
+
+        sentinel.checkVault{value: CHECK_VALUE}(address(vault));
+        platform.simulateCallback(_latestRequestId(), "SAFE");
+
+        VaultSentinel.RiskSnapshot[] memory history = sentinel.getHistory(address(vault));
+        assertEq(history.length, 1, "should have exactly one snapshot");
+
+        // Proves AC-4 end-to-end: stored idleBps is in basis points
+        assertEq(history[0].idleBps, expectedIdleBps, "snapshot idleBps must match vault.idleBufferBps()");
+
+        // Additional sanity: the stored value is bps-scale (>=100 for any non-trivial idle)
+        // A 40% idle buffer should be 4000 bps, not 40 (old integer percent)
+        assertGe(history[0].idleBps, 100, "idleBps must be bps-scale, not integer-percent-scale");
     }
 
     receive() external payable {}

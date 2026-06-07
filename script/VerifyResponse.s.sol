@@ -104,9 +104,9 @@ contract VerifyResponse is Script {
     ) internal view {
         bool paused = vault.depositsPaused();
         uint256 totalA = vault.totalAssets();
-        uint256 idlePct = vault.idleBufferPct();
-        uint256 mktAPct = vault.marketAllocationPct(address(marketA));
-        uint256 mktBPct = vault.marketAllocationPct(address(marketB));
+        uint256 idlePct = vault.idleBufferBps();
+        uint256 mktAPct = vault.marketAllocationBps(address(marketA));
+        uint256 mktBPct = vault.marketAllocationBps(address(marketB));
         uint256 mktABal = marketA.balanceOf(vaultAddr);
         uint256 mktBBal = marketB.balanceOf(vaultAddr);
         uint256 mktAUtil = marketA.utilizationBps();
@@ -115,9 +115,9 @@ contract VerifyResponse is Script {
         console.log("\n--- VAULT STATE ---");
         console.log("depositsPaused:     ", paused);
         console.log("totalAssets (USDC): ", totalA / 1e6);
-        console.log("idleBufferPct:      ", idlePct, "%");
-        console.log("Market A alloc:     ", mktAPct, "%");
-        console.log("Market B alloc:     ", mktBPct, "%");
+        console.log("idleBufferBps:      ", idlePct, "bps");
+        console.log("Market A alloc:     ", mktAPct, "bps");
+        console.log("Market B alloc:     ", mktBPct, "bps");
         console.log("Market A balance:   ", mktABal / 1e6, "USDC");
         console.log("Market B balance:   ", mktBBal / 1e6, "USDC");
         console.log("Market A util (bps):", mktAUtil);
@@ -162,6 +162,6 @@ contract VerifyResponse is Script {
         console.log("timestamp:          ", snap.timestamp);
         console.log("rawVerdict:         ", snap.rawVerdict);
         console.log("totalAssets snap:   ", snap.totalAssets / 1e6, "USDC");
-        console.log("idlePct snap:       ", snap.idlePct, "%");
+        console.log("idleBps snap:       ", snap.idleBps, "bps");
     }
 }

@@ -56,7 +56,7 @@ contract TriggerCheck is Script {
         console.log("totalChecks so far: ", totalChecks);
         console.log("We will send (STT): ", DEPOSIT);
         console.log("totalAssets (USDC): ", vault.totalAssets() / 1e6);
-        console.log("idleBufferPct:      ", vault.idleBufferPct(), "%");
+        console.log("idleBufferBps:      ", vault.idleBufferBps(), "bps");
         console.log("==============================\n");
 
         vm.startBroadcast(deployerKey);

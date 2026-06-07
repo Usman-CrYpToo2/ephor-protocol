@@ -44,3 +44,9 @@ vulnerability_summary.md
 # Auto-added by /commit — runtime output & scratch files
 history.txt
 submission.txt
+
+# Claude Code skill packages (generated binary archives)
+*.skill
+
+# Claude Code agent runtime memory (ephemeral agent state)
+.claude/agent-memory/

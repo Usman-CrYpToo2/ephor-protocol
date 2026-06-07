@@ -398,16 +398,26 @@ contract CuratedVault is ERC20Base, AccessControl, ReentrancyGuard {
     //  SENTINEL QUERY HELPERS (read-only, no external API needed)
     // ═══════════════════════════════════════════════════════════════
 
-    function marketAllocationPct(address market) external view returns (uint256) {
+    /// @notice Fraction of vault assets allocated to `market`, in basis points (bps).
+    ///         1% = 100 bps, 100% = 10_000 bps.
+    ///         Returns 0 when totalAssets is zero.
+    /// @dev    Replaces the deprecated `marketAllocationPct` (which used *100 and lost
+    ///         sub-percent precision). Fixes D-3: thresholds at 40% now distinguish
+    ///         40.0% (4000 bps) from 40.9% (4090 bps) without ambiguity.
+    function marketAllocationBps(address market) external view returns (uint256) {
         uint256 t = totalAssets();
         if (t == 0) return 0;
-        return ILendingMarket(market).balanceOf(address(this)) * 100 / t;
+        return ILendingMarket(market).balanceOf(address(this)) * 10_000 / t;
     }
 
-    function idleBufferPct() external view returns (uint256) {
+    /// @notice Fraction of vault assets held idle (unallocated), in basis points (bps).
+    ///         1% = 100 bps, 100% = 10_000 bps.
+    ///         Returns 0 when totalAssets is zero.
+    /// @dev    Replaces the deprecated `idleBufferPct` (which used *100). Fixes D-3.
+    function idleBufferBps() external view returns (uint256) {
         uint256 t = totalAssets();
         if (t == 0) return 0;
-        return asset.balanceOf(address(this)) * 100 / t;
+        return asset.balanceOf(address(this)) * 10_000 / t;
     }
 
     function marketCount() external view returns (uint256) {

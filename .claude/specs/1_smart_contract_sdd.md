@@ -1,12 +1,15 @@
-# Ephor Protocol — Specification-Driven Development Document (v2.0)
+# Ephor Protocol — Specification-Driven Development Document (v2.2)
 
 > **Autonomous AI Risk + Allocation Layer for ERC-4626 Vaults on the Somnia Agentic L1**
 >
 > **Document type:** Specification-Driven Development (SDD) / Technical Design Document (TDD)
 > **Status:** Draft for implementation
+> **Version:** 2.2 — corrects USDC-specific assumptions; vault is asset-agnostic; adds market lifecycle; fixes decimal handling
+> **Changelog from v2.1:** Removed all USDC-specific language throughout; vault accepts any ERC-20 asset configured at deployment; fixed §6.1 decimal assumption; fixed §9.3 feature block label; clarified market addition lifecycle (§5.4); updated §13, §14, §19, §21, Appendix A
+> **Changelog from v2.0→v2.1:** Added D-8, G-8, P-9, I-11, §7.7 (UtilizationOracle + dual-track TWAP)
 > **Audience:** Claude Code (implementer) + human reviewers
 > **Authoring lens:** Lead software engineer · blockchain protocol engineer · smart-contract security auditor
-> **Scope:** Theory, architecture, invariants, prompt strategy, mocks, threat model, test plan. **No production Solidity in this file** — the implementing agent writes all code from this spec.
+> **Scope:** Theory, architecture, invariants, prompt strategy, mocks, threat model, test plan. **No production Solidity in this file.**
 
 ---
 
@@ -15,37 +18,52 @@
 This is a **specification**, not an implementation. It is written to be handed to an autonomous coding agent (Claude Code) that will:
 
 1. Read this entire document top to bottom **before writing any code**.
-2. Produce a short implementation plan that maps each numbered requirement (`R-*`), invariant (`I-*`), and acceptance criterion (`AC-*`) to concrete files, functions, and tests.
-3. Implement contracts, mocks, scripts, and tests that satisfy every `MUST` and document every deviation from a `SHOULD`.
-4. Verify against the **live Somnia primitives** described in §4 and §Appendix B — and **re-generate the exact agent interfaces from `https://agents.somnia.network`** rather than trusting any signature reproduced here from memory.
+2. Produce a short implementation plan mapping each `R-*`, `I-*`, `AC-*`, and `D-*` to concrete files, functions, and tests.
+3. Implement contracts, mocks, scripts, and tests satisfying every `MUST`; document every deviation from a `SHOULD`.
+4. Verify against live Somnia primitives (§4, Appendix B) — re-generate exact agent interfaces from `https://agents.somnia.network`.
 
-**Normative language.** "MUST", "MUST NOT", "SHOULD", "SHOULD NOT", "MAY" follow RFC-2119 meaning. A `MUST` is a hard requirement; violating it is a defect. A `SHOULD` is a strong default; deviating requires a written justification in the PR.
+**Normative language.** MUST / MUST NOT / SHOULD / SHOULD NOT / MAY follow RFC-2119.
 
-**Golden rule of this redesign (read this twice):**
-
+**Golden rule (read twice):**
 > **The EVM is the constitution. The AI is an advisor with no signing authority.**
-> Every number the AI emits is a *request*, never a *command*. The vault re-derives, re-validates, and re-bounds everything at the custody boundary before a single wei moves. If the AI is wrong, malicious, slow, or absent, depositor funds remain safe by construction — not by trust.
+> Every number the AI emits is a *request*, never a *command*. The vault re-derives, re-validates, and re-bounds everything at the custody boundary before a single wei moves.
+
+**Second golden rule (v2.1):**
+> **Every metric fed to a risk decision MUST be manipulation-resistant.**
+> A spot read from any external contract is a weapon. The sentinel MUST NEVER use raw spot utilization as the sole input to any threshold comparison or AI feature. All utilization inputs go through the UtilizationOracle dual-track filter first.
+
+**Third golden rule (v2.2):**
+> **The vault is asset-agnostic. Never hardcode USDC, 6 decimals, or any specific token.**
+> The vault's ERC-20 asset is configured at deployment and is immutable thereafter. Every lending market added by the curator must lend and return that same asset. The AI, the oracle, the mocks, and all arithmetic must work correctly regardless of the asset's decimal count or token type.
 
 ---
 
 ## 1. Executive Summary
 
-Ephor Protocol is an ERC-4626 USDC yield vault on Somnia that uses Somnia's native, validator-consensus LLM inference to (a) **defend** the vault (autonomous risk circuit-breaker) and, new in v2, (b) **grow** the vault (autonomous capital allocation across lending markets).
+Ephor Protocol is an **ERC-4626 yield vault for any configured ERC-20 asset** on Somnia. It uses Somnia's native, validator-consensus LLM inference to (a) **defend** the vault (autonomous risk circuit-breaker) and (b) **grow** the vault (autonomous capital allocation across lending markets). The vault's asset — which token it holds, lends, and distributes yield in — is set once at deployment by the owner and never changes.
 
-The v1 system works but has three classes of problem this SDD resolves:
+**What the owner can configure after deployment:**
+- Add new lending markets (timelocked, requires curator role)
+- Set and adjust per-market supply caps
+- Set and adjust risk parameters (idle floor, concentration limits, thresholds)
+- Replace the AI arms (RiskSentinel, AllocationStrategist) without touching the vault
+- Add market adapters in the oracle for each new market
 
-1. **The prompt strategy is ill-defined and asks the LLM to do the EVM's job.** The current design hands the model raw numbers and asks it to apply fixed arithmetic thresholds (`allocation > 40%`, `utilization > 95%`). Arithmetic thresholds are deterministic and belong on-chain. Pushing them into a probabilistic model adds latency, cost, consensus fragility, and precision loss — for zero benefit. (See §2.3, §7, §9.)
-2. **Structural correctness and precision defects** (an off-by-logic "worst market" selection bug, a fragile hand-rolled integer-to-string formatter, integer-percent metrics that destroy the exact boundary the rules depend on, and an under-sized agent deposit that will silently time out on mainnet). (See §2.4.)
-3. **No allocation brain.** Capital movement is manual, single-market, and unoptimized. v2 introduces an **AI Allocation Strategist** that proposes target allocations which the vault validates against hard invariants and executes — *autonomous execution behind EVM guardrails*. (See §8, §10, §11.)
+The v1 system works but has four classes of problem this SDD resolves:
 
-The redesign cleanly separates two AI agents with least-privilege, replaceable roles:
+1. **The prompt strategy asks the LLM to do the EVM's job.** Fixed arithmetic thresholds belong on-chain. The AI should judge patterns, not run calculators. (§2.3, §7, §9.)
+2. **Structural correctness and precision defects.** Seven bugs including wrong worst-market selection, broken number formatter, integer-percent precision loss, under-funded agent deposit. (§2.4, D-1..D-7.)
+3. **No allocation brain.** Capital movement is manual. v2 adds an AI Allocation Strategist that proposes target allocations the vault validates and executes. (§8, §10, §11.)
+4. **Flash-loan manipulation of spot utilization.** Any spot read from an external market is manipulable. A TWAP oracle is required. (§2.4 D-8, §7.7.)
+
+The redesign separates two AI agents with least-privilege, replaceable roles:
 
 | Agent | Posture | Role held | Can do | Can never do |
 |---|---|---|---|---|
 | **RiskSentinel** | Defensive (circuit-breaker) | `SENTINEL_ROLE` | Pause deposits, emergency-deallocate, lower caps | Add markets, raise caps, move funds *into* markets |
 | **AllocationStrategist** | Offensive (yield optimizer) | `ALLOCATOR_ROLE` | Propose a target allocation vector; trigger a validated rebalance | Exceed any cap, breach the idle floor, exceed turnover/concentration limits, touch a non-whitelisted market |
 
-Both agents are **smart contracts** that talk to the Somnia Agent Platform. Both are bounded by EVM invariants enforced **inside the vault's `reallocate` entrypoint** — so even a fully compromised AI cannot violate a cap, drain liquidity, or route to an unapproved market.
+Both agents are smart contracts bounded by EVM invariants enforced inside the vault's `reallocate` entrypoint. All utilization data passes through the UtilizationOracle before any risk decision is made.
 
 ---
 
@@ -53,48 +71,49 @@ Both agents are **smart contracts** that talk to the Somnia Agent Platform. Both
 
 ### 2.1 What exists today (v1)
 
-- `CuratedVault` — ERC-4626 USDC vault, inline ERC-20 share token, inline `AccessControl`/`ReentrancyGuard`, virtual-shares/assets inflation protection (`VSHARES=VASSETS=1`), timelocked market additions and cap increases, immediate cap decreases / action revocations, performance fee accrual, `_ensureLiquidity` withdrawal pull-down.
-- `VaultSentinel` — reads five metrics, builds a plain-English prompt, calls `inferString` with `allowedValues=[SAFE,CAUTION,CRITICAL]`, and on `CRITICAL` pauses deposits and deallocates 50% of the "worst" market (only if utilization > 90%).
-- `ISomnia.sol` — accurate transcription of the real platform interface (`IAgentRequester`, callback signature, `Response`/`Request` structs, `ConsensusType`, `ResponseStatus`, agent method interfaces).
-- Mocks — `MockUSDC` (6-dec, open mint), `MockLendingMarket` (per-second 5% APY compounding, `setUtilization`, `fastForwardDays`), `MockSomniaPlatform` (`createRequest`, `simulateCallback`, `simulateTimeout`).
+- `CuratedVault` — ERC-4626 vault with a **configurable ERC-20 asset** (currently deployed with USDC for testnet, but the contract accepts any ERC-20 at construction). Inline ERC-20 share token, inline AccessControl/ReentrancyGuard, virtual-shares/assets inflation protection (VSHARES=VASSETS=1), timelocked market additions and cap increases, immediate cap decreases and revocations, performance fee accrual, `_ensureLiquidity` withdrawal pull-down.
+- `VaultSentinel` — reads five metrics, builds a plain-English prompt, calls `inferString` with `allowedValues=[SAFE,CAUTION,CRITICAL]`, and on CRITICAL pauses deposits and deallocates 50% of the "worst" market.
+- `ISomnia.sol` — accurate transcription of the real platform interface.
+- Mocks — `MockERC20` (configurable decimals, open mint; deployed as 6-decimal USDC for testnet), `MockLendingMarket`, `MockSomniaPlatform`.
 
 ### 2.2 What is genuinely good and MUST be preserved
 
 - **ERC-4626 inflation-attack protection** via virtual offsets — keep.
-- **Role separation with risk-reducing-only sentinel** — keep and extend; this mirrors the production Morpho V2 model (Curator/Allocator/Sentinel).
-- **Timelocked risk-increasing actions** (market adds, cap raises) with immediate risk-reducing actions (cap cuts, revokes) — keep; this is the correct asymmetry.
-- **`onlyPlatform` + `pendingRequests` callback gating** and the **fail-safe (timeout → CAUTION, never silent SAFE)** philosophy — keep and generalize.
+- **Asset-agnostic vault design** — the vault accepts any ERC-20 at construction. This MUST remain. No USDC-specific logic anywhere in the core vault.
+- **Role separation with risk-reducing-only sentinel** — keep; mirrors production Morpho V2.
+- **Timelocked risk-increasing actions** with immediate risk-reducing actions — keep.
+- **`onlyPlatform` + `pendingRequests` callback gating** and fail-safe philosophy — keep.
 - **CEI + `nonReentrant`** discipline — keep.
-- **Exact callback name/selector discipline** (`handleResponse.selector`) and **`pendingRequests` being `public`** for mock lookup — keep.
+- **Exact callback name/selector discipline** — keep.
 
 ### 2.3 The core problem: the prompt strategy (root-cause analysis)
 
 The current system prompt instructs the model:
 
-> *"CRITICAL if ANY: (1) any market allocation > 40%; (2) idle buffer < 5%; (3) any market utilization > 95% …"*
+> *"CRITICAL if ANY: (1) any market allocation > 40%; (2) idle buffer < 5%; (3) any market utilization > 95%"*
 
-This is the central design error. **These are deterministic numeric predicates.** A `uint256` comparison on-chain is exact, free of consensus risk, costs almost nothing, and can never hallucinate. Routing it through an LLM introduces every one of the following failure modes:
+This is the central design error. These are deterministic numeric predicates that belong on-chain, not in an LLM. The four resulting failure modes:
 
-- **F1 — Boundary ambiguity.** Is `40%` critical or the start of caution? Is the comparison inclusive? LLMs are unreliable exactly at thresholds, and the v1 user prompt *truncates* `utilBps/100`, so `9499 bps` and `9450 bps` both render as `"94%"`, erasing the very boundary (`95%`) the rule hinges on. The model is asked to be precise about data that has already lost precision.
-- **F2 — Consensus fragility.** Somnia reaches consensus on AI output by requiring **byte-identical results across validators** (fixed seed, `temperature=0`). The more reasoning the model must do over free-form text, the larger the surface for one validator to diverge — risking `Failed`/`TimedOut` instead of a verdict.
-- **F3 — Wasted capability.** The LLM is a pattern-recognition engine. Spending it on `if (x > 40)` is like hiring a strategist to run a calculator. The genuinely AI-suitable judgment (regime detection, relative ranking under multiple weak signals) is *not* being used.
-- **F4 — No structured, auditable output.** A single bare word is the entire verdict. There is no per-market breakdown, no severity score, no machine-readable reasoning for the audit trail.
+- **F1 — Boundary ambiguity + precision loss.** The prompt truncates `utilBps/100`, so 9499 and 9450 both render as "94%", erasing the 95% boundary the rule depends on.
+- **F2 — Consensus fragility.** Somnia requires byte-identical output across validators. Complex free-form reasoning over text creates divergence risk.
+- **F3 — Wasted capability.** Using an LLM to evaluate `if (x > 40)` wastes the tool built for pattern recognition.
+- **F4 — No auditable output.** A single bare word has no per-market breakdown, no severity score, no reasoning trail.
 
-**Resolution (preview):** move all hard numeric thresholds **on-chain as deterministic circuit-breakers**, and narrow the AI to the judgment it is actually good at, fed by a **lossless, canonical, integer-only** prompt with **constrained outputs** (§7, §9).
+**Resolution:** move all hard numeric thresholds on-chain as deterministic circuit-breakers; narrow the AI to judgment only (§7, §9).
 
 ### 2.4 Concrete defects found in v1 (audit findings)
 
-These are recorded so the implementer fixes them, not merely re-ports them.
-
 | ID | Severity | Location | Finding | Required fix |
 |---|---|---|---|---|
-| **D-1** | High (correctness) | `VaultSentinel._deallocateWorstMarket` | The loop assigns `worst = m` **unconditionally** on every iteration; it is outside the `if (u > worstUtil)` block. The "worst" market is therefore always the **last** market in the list, not the highest-utilization one. The `> 9000 bps` guard then applies to the wrong market. | Track `worst` only when a strictly higher utilization is found; select the true argmax. (Superseded by the redesigned, on-chain risk engine in §7.) |
-| **D-2** | High (liveness) | `VaultSentinel._u` integer formatter | Hand-rolled `uint→string` is fragile and, as written, the digit-count and digit-emit loops do not advance their counters inside the loop body, risking non-termination / gas exhaustion, and the logic is incorrect for multi-digit values. Building prompts via manual decimal rendering is an anti-pattern. | Eliminate hand-rolled formatting. Use a vetted library routine (e.g., OpenZeppelin `Strings.toString`) **only if** human-readable prompts are retained; preferably switch to a canonical integer feature encoding (§9.3) that is unit-test-pinned. |
-| **D-3** | Medium (precision) | `CuratedVault.marketAllocationPct`, `idleBufferPct`; sentinel prompt | Metrics are integer **percent** (`*100/t`), discarding sub-percent precision. Risk rules expressed at 25%/40% cannot distinguish 40.0% from 40.9%. | Express all ratios in **basis points (bps, /10000)**. All thresholds, caps, and AI features use bps. |
-| **D-4** | Medium (liveness/cost) | `README` deposit guidance ("0.15 STT") | LLM inference is **0.07 per validator**; with the default subcommittee of 3 the reward pot alone is `0.21`, plus the operations-reserve floor from `getRequestDeposit()`. 0.15 STT under-funds the request → `perAgentBudget` too low → runners skip → `TimedOut`. `CLAUDE.md`'s 0.25 STT figure is the correct one. | Compute deposit at call time as `getRequestDeposit() + LLM_COST_PER_AGENT * subcommitteeSize`. Never hardcode a guess. Reconcile README/CLAUDE.md/code to one source of truth. |
-| **D-5** | Medium (logic redundancy) | `VaultSentinel._respondToCritical` / `_deallocateWorstMarket` | When the AI returns `CRITICAL`, the contract still **re-gates** on `utilization > 9000 bps` before acting. If the AI's notion of "critical" diverges from that single on-chain predicate, the AI verdict is silently ignored. The system can't decide whether the AI or the on-chain check is authoritative. | Make the **on-chain hard guards authoritative for action**; treat the AI verdict as an *escalation/severity signal* layered on top (§7.4). Document one clear precedence rule. |
-| **D-6** | Low (consensus handling) | `VaultSentinel.handleResponse` | Reads `responses[0]` only and trusts `status==Success`. For `Majority` consensus this is acceptable (the threshold guarantees identical bytes), but there is no defense-in-depth check that the agreeing set actually met `details.threshold`. | Verify `status==Success` **and** optionally assert `details.responseCount >= details.threshold` before acting; document the assumption. |
-| **D-7** | Low (liveness) | Idle buffer | No invariant guarantees a minimum idle buffer is *maintained* after allocation; `_ensureLiquidity` only reacts at redeem time and can force costly unwinds / fail under market illiquidity. | Introduce a curator-set `minIdleBufferBps` enforced on every allocation/rebalance (I-3). |
+| **D-1** | High (correctness) | `VaultSentinel._deallocateWorstMarket` | `worst = m` is unconditional in the loop — always picks the last market in the list, never the highest-utilization one. | Track `worst` only inside the `if (u > worstUtil)` block. |
+| **D-2** | High (liveness) | `VaultSentinel._u` formatter | Digit-count and digit-emit loops do not advance their counters — risks infinite loop / gas exhaustion. | Delete `_u`. Use canonical integer feature encoding (§9.3). |
+| **D-3** | Medium (precision) | `CuratedVault.marketAllocationPct`, `idleBufferPct` | Integer percent (`*100/t`) discards sub-percent precision. Thresholds at 40% cannot distinguish 40.0% from 40.9%. | Express all ratios in **basis points (bps, /10000)**. |
+| **D-4** | Medium (liveness/cost) | `README` deposit guidance (0.15 STT) | LLM costs 0.07/validator × 3 = 0.21 reward + floor ≈ 0.25 STT. 0.15 under-funds → runners skip → TimedOut. | Compute at call time: `getRequestDeposit() + LLM_COST_PER_AGENT * subcommitteeSize`. |
+| **D-5** | Medium (logic redundancy) | `VaultSentinel._respondToCritical` | After AI says CRITICAL, contract re-gates on `util > 9000` before acting — AI verdict silently ignored. No clear authority. | On-chain hard guards are authoritative; AI is an escalation modifier layered on top (§7.4). |
+| **D-6** | Low (consensus handling) | `VaultSentinel.handleResponse` | Reads `responses[0]`, trusts `status==Success` without verifying the agreeing set met `details.threshold`. | Verify status AND assert responseCount >= threshold. |
+| **D-7** | Low (liveness) | Idle buffer | No invariant maintains a minimum idle buffer after allocation — `_ensureLiquidity` only reacts at redeem time. | Introduce curator-set `minIdleBufferBps` enforced on every allocation (I-3). |
+| **D-8** | **Critical (security)** | `VaultSentinel._readMetrics` | Sentinel reads **spot utilization** from an external market in the same transaction as `checkVault`. An attacker can flash-loan to spike utilization, trigger a false emergency, then repay. Two-block defense also fails — attacker can manipulate both blocks. Real precedent: Mango Markets ($117M), Beanstalk ($182M). | Deploy `UtilizationOracle` with TWAP accumulator. Sentinel reads `effectiveUtil` from the dual-track filter, never raw spot. (§7.7) |
+| **D-9** | **Critical (assumption)** | Entire codebase, documentation, mocks | **USDC-specific hardcoding throughout.** Asset decimal count (6) hardcoded; "USDC" named in prompts, docs, variable names, mock names; feature block labels USDC. The vault contract itself is asset-agnostic, but all surrounding code treats it as USDC-only. | Remove all asset-specific references. Vault asset is set at deployment. Decimal count is read from the asset contract at runtime. All references to "USDC" become "vault asset." (§2.2, §5.4, §6.1) |
 
 ---
 
@@ -102,58 +121,57 @@ These are recorded so the implementer fixes them, not merely re-ports them.
 
 ### 3.1 Goals (G)
 
-- **G-1** Re-architect so that **all deterministic risk arithmetic is on-chain** and the AI is used only for genuine judgment.
-- **G-2** Redesign the **prompt strategy** for losslessness, determinism (consensus-safety), constrained outputs, and auditability.
-- **G-3** Add an **autonomous Allocation Strategist**: the AI proposes target allocations; the EVM validates against hard invariants and executes — *autonomous execution behind guardrails*.
-- **G-4** Guarantee, by construction, that **no AI output can violate a depositor-protecting invariant** (caps, idle floor, concentration, turnover, whitelist, conservation).
-- **G-5** Preserve a **fail-safe** posture: AI absence/failure/timeout never harms depositors and never silently increases risk.
-- **G-6** Keep the system **live-deployable on Somnia today** using only documented primitives; isolate any speculative feature behind a clearly-labeled future tier.
-- **G-7** Provide **complete mocks** enabling deterministic, fast, local testing of every path including adversarial AI behavior and validator disagreement.
+- **G-1** Re-architect so all deterministic risk arithmetic is on-chain; AI used only for genuine judgment.
+- **G-2** Redesign the prompt strategy for losslessness, determinism, constrained outputs, and auditability.
+- **G-3** Add an autonomous Allocation Strategist: AI proposes target allocations; EVM validates and executes.
+- **G-4** Guarantee by construction that no AI output can violate a depositor-protecting invariant.
+- **G-5** Preserve a fail-safe posture: AI absence/failure/timeout never harms depositors.
+- **G-6** Keep the system live-deployable on Somnia today using only documented primitives.
+- **G-7** Provide complete mocks enabling deterministic local testing including adversarial AI behavior.
+- **G-8** Flash-loan manipulation resistance: all utilization inputs MUST be time-weighted.
+- **G-9** *(New v2.2)* **Asset-agnosticism**: the vault, its AI arms, oracle, mocks, and all documentation MUST work correctly for any ERC-20 asset regardless of decimal count. No USDC-specific logic in any contract.
 
 ### 3.2 Non-Goals (NG)
 
-- **NG-1** No cross-chain, no bridging, no external price oracles for v2 core (a yield signal is sourced from the markets themselves / an optional JSON-API agent — see §8.5).
+- **NG-1** No cross-chain or bridging. No mandatory external price oracles for v2 core.
 - **NG-2** No change to the ERC-4626 share-accounting math (virtual offsets retained).
-- **NG-3** No raw-calldata agent execution (`inferToolsChat`) in v2 production path; documented as Tier-3 future work with explicit guardrails (§8.6, §20).
-- **NG-4** No mainnet deployment with real funds without a formal third-party audit (carried over from v1 README).
+- **NG-3** No raw-calldata agent execution (`inferToolsChat`) in v2 production path.
+- **NG-4** No mainnet deployment with real funds without a formal third-party audit.
+- **NG-5** *(New v2.2)* No multi-asset vault (one vault = one asset). Multiple asset types require multiple vault deployments. This is the correct ERC-4626 pattern.
 
-### 3.3 Success criteria (high level; see §18 for full `AC-*`)
+### 3.3 Success criteria (high level; see §18 for full AC-*)
 
-- The vault behaves identically to v1 for deposit/redeem/share-price.
-- The RiskSentinel fires hard circuit-breakers **on-chain** with the AI as a layered second opinion; the `_deallocateWorstMarket` defect is gone.
-- The AllocationStrategist can take any AI proposal — including a deliberately malicious one in tests — and the vault **never** ends in a state that violates any `I-*`.
-- All agent deposits are computed from `getRequestDeposit()` + reward, never hardcoded.
-- 100% of invariants have at least one positive test and one adversarial (rejection) test.
+- Vault behaves identically to v1 for deposit/redeem/share-price for any configured ERC-20 asset.
+- RiskSentinel fires hard circuit-breakers on-chain with AI as layered second opinion.
+- AllocationStrategist cannot produce a state that violates any I-*.
+- All agent deposits computed from `getRequestDeposit()` + reward, never hardcoded.
+- A flash-loan spike of 2000+ bps in one block moves the TWAP by less than 50 bps (proven by test).
+- System works correctly with WETH (18 decimals), WBTC (8 decimals), and USDC (6 decimals) in tests.
+- 100% of invariants have at least one positive and one adversarial test.
 
 ---
 
-## 4. Research Foundations (grounding the design in reality)
-
-This section records the external facts the design depends on. The implementer MUST re-verify the live signatures from the Somnia agent explorer before coding.
+## 4. Research Foundations
 
 ### 4.1 Somnia Agent Platform — the execution substrate
 
-- A Somnia Agent is a sandboxed, validator-executed compute container addressable by `agentId`. Contracts invoke it with ABI-encoded calldata; execution happens **off the EVM** on a subcommittee of validators; the result returns **asynchronously** via a callback. (`docs.somnia.network/agents/invoking-agents/from-solidity`.)
+- A Somnia Agent is a sandboxed, validator-executed compute container addressable by `agentId`. Contracts invoke it with ABI-encoded calldata; result returns **asynchronously** via a callback.
 - **Two-phase async model:** `createRequest{value}(agentId, callbackAddress, callbackSelector, payload)` returns a `requestId` synchronously; later the platform invokes `handleResponse(requestId, Response[] responses, ResponseStatus status, Request details)`.
-- **Consensus:** `ConsensusType.Majority` (validators must agree on the **same result bytes**) or `ConsensusType.Threshold` (results counted individually). **LLM/JSON agents use Majority.** Majority is *only* reachable because LLM agents run with **fixed seed and temperature = 0**, making validator outputs byte-identical. **This is the single most important constraint on prompt design.**
-- **Deposit sizing:** `msg.value MUST be ≥ getRequestDeposit() + pricePerAgent × subcommitteeSize`. The floor alone sets `perAgentBudget = 0`, runners skip the job, and the request times out. Implement `receive()` to accept the automatic rebate of unused budget.
-- **Status handling:** a request finalizes as `Success(2)`, `Failed(3)`, or `TimedOut(4)`. Decoding `responses[0].result` on a non-success status is a panic; always branch on status first.
-- **Platform addresses:** Testnet (chain `50312`) `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`; Mainnet (chain `5031`) `0x5E5205CF39E766118C01636bED000A54D93163E6`.
+- **Consensus:** `ConsensusType.Majority` requires byte-identical results across validators. LLM agents use Majority — only reachable because they run with fixed seed and temperature=0.
+- **Deposit sizing:** `msg.value MUST be ≥ getRequestDeposit() + pricePerAgent × subcommitteeSize`. Implement `receive()` for unused budget rebate.
+- **Status handling:** Success(2), Failed(3), TimedOut(4). Never decode `responses[0].result` on a non-success status.
+- **Platform addresses:** Testnet (50312): `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`; Mainnet (5031): `0x5E5205CF39E766118C01636bED000A54D93163E6`.
 
 ### 4.2 The LLM Inference base agent (Qwen3-30B), four methods
 
-The platform's LLM Inference agent (price **0.07 per validator**) exposes four methods of increasing power. Choosing the right one is the heart of this redesign:
-
 | Method | Output shape | Consensus safety | Use in Ephor |
 |---|---|---|---|
-| `inferString(prompt, system, chainOfThought, allowedValues[])` | One string, constrainable to an enum | **Highest** (output ∈ small fixed set) | Risk verdict; Tier-1 allocation **strategy label** |
-| `inferNumber(...)` | One integer, **clamped to a range** | **High** (single integer) | Tier-2 per-market **attractiveness score** |
-| `inferChat(...)` | Multi-turn free text | Lower (free-form) | Not used in v2 core |
-| `inferToolsChat(...)` | Tool calls / **calldata yielded back to the contract** | Lowest (free-form calldata) | **Tier-3 future only**, behind full re-validation |
+| `inferString(prompt, system, chainOfThought, allowedValues[])` | One string, constrainable to an enum | **Highest** | Risk verdict; Tier-1 allocation strategy label |
+| `inferNumber(...)` | One integer, clamped to a range | **High** | Tier-2 per-market attractiveness score |
+| `inferChat(...)` | Multi-turn free text | Lower | Not used in v2 core |
+| `inferToolsChat(...)` | Tool calls / calldata yielded back to contract | Lowest | Tier-3 future only |
 
-The official developer guide explicitly frames `inferToolsChat` for "agentic DeFi bots" where "the model decides which DEX to call and yields the calldata back to your contract." We deliberately **do not** use that in v2 production because raw model-authored calldata is the largest possible attack surface and inverts the "EVM is the constitution" principle. We use the **most constrained primitive that can express the decision** (§8).
-
-> **Implementer action (Appendix B):** the exact parameter lists for `inferNumber`/`inferChat`/`inferToolsChat` MUST be regenerated from `agents.somnia.network` ("Solidity" tab). Do not assume the order/types reproduced anywhere in this document; treat §4.2 as semantic, not syntactic.
+> **Implementer action (Appendix B):** Exact parameter lists MUST be regenerated from `agents.somnia.network`.
 
 ### 4.3 Per-agent prices (for deposit sizing)
 
@@ -163,17 +181,18 @@ The official developer guide explicitly frames `inferToolsChat` for "agentic DeF
 | **LLM Inference** | **0.07** | 3 | **0.21** |
 | LLM Parse Website | 0.10 | 3 | 0.30 |
 
-Add `getRequestDeposit()` (operations-reserve floor) on top. Practical LLM deposit ≈ **0.25 STT** (matches `CLAUDE.md`). **Never hardcode**; always `getRequestDeposit() + price × size` at call time.
+Add `getRequestDeposit()` floor. Practical LLM deposit ≈ **0.25 STT**. Never hardcode.
 
-### 4.4 Production curated-vault patterns (the allocation model to imitate)
+### 4.4 Production curated-vault patterns
 
-Anchoring the new allocator in battle-tested DeFi:
+- **MetaMorpho / Morpho Vaults** — ERC-4626 vaults with Curator (caps/fees, timelocked), Allocator (active allocation within caps), Sentinel (reactively reduce risk). Ephor's roles mirror this exactly; v2 makes the Allocator an AI.
+- **Key MetaMorpho invariant:** supply caps guarantee allocators cannot put more than the cap amount into any single market. This is the primary protection even if the AI behaves adversarially.
 
-- **MetaMorpho / Morpho Vaults** are ERC-4626 vaults whose allocators move capital across enabled markets to optimize yield while respecting **per-market supply caps** that "guarantee that allocators cannot reallocate more than that limit to that market." Max 30 markets per vault. Risk-altering actions are timelocked.
-- **Morpho Vault V2 role model** is exactly our target: **Curator** (caps/fees, timelocked), **Allocator** (active allocation to enabled markets), **Sentinel** (reactively reduce risk — deallocate, decrease caps, revoke pending actions). Ephor's roles already mirror this; v2 makes the Allocator an AI.
-- **Gauntlet's curation methodology** frames allocation as continuously optimizing **risk-adjusted yield** under caps, treating market caps as exposure limits and reallocating as conditions change. This is the objective function our Strategist approximates: *maximize expected yield subject to risk/exposure constraints*.
+### 4.5 Flash-loan manipulation — real-world precedent
 
-**Design takeaway:** the canonical safe interface is a **batch `reallocate(targets[])`** that the custody contract validates against caps and executes atomically. The AI's job is to *propose the targets*; the vault's job is to *enforce the constraints*. This is precisely the "untrusted allocator + EVM guardrails" architecture requested.
+- **Mango Markets (Oct 2022) — $117M:** Spot price manipulated in one transaction; borrowed against inflated collateral.
+- **Beanstalk (Apr 2022) — $182M:** Flash loan used to gain temporary governance supermajority atomically.
+- **Common pattern:** read an external value → attacker controls it in-block → protocol acts on the fake value. **Defense:** time-weighted averages that flash loans cannot meaningfully shift.
 
 ---
 
@@ -182,75 +201,157 @@ Anchoring the new allocator in battle-tested DeFi:
 ### 5.1 Component overview
 
 ```
-                          ┌─────────────────────────────────────────────────────────┐
-                          │                      Somnia Agent Platform                │
-                          │   IAgentRequester  ·  LLM Inference Agent (Qwen3-30B)     │
-                          │   Majority consensus · fixed seed · temp=0 · async cb     │
-                          └───────▲───────────────────────────────────────▲──────────┘
-                                  │ createRequest / handleResponse         │
-            (defensive path)      │                                        │   (offensive path)
-                          ┌───────┴────────┐                       ┌───────┴─────────────┐
-                          │  RiskSentinel  │                       │ AllocationStrategist │
-                          │  SENTINEL_ROLE │                       │   ALLOCATOR_ROLE      │
-                          │                │                       │                       │
-                          │ on-chain hard  │                       │ snapshot features →   │
-                          │ guards (auth.) │                       │ AI proposal →         │
-                          │ + AI 2nd-opinion│                      │ deterministic project │
-                          └───────┬────────┘                       └───────┬──────────────┘
-                                  │ pauseDeposits / emergencyDeallocate     │ reallocate(targets, guard)
-                                  │ lowerCap                                │
-                          ┌───────▼─────────────────────────────────────────▼──────────┐
-                          │                       CuratedVault (ERC-4626)               │
-                          │  ── THE CONSTITUTION: invariant enforcement at custody ──    │
-                          │  deposit/redeem · share math · timelocked market mgmt        │
-                          │  reallocate(targets) re-validates I-1..I-10 before moving    │
-                          │  risk params (caps, idle floor, concentration, turnover)     │
-                          └───────┬──────────────────────────────────────────┬──────────┘
-                                  │ supply / withdraw                          │ view metrics (bps)
-                          ┌───────▼─────────┐   ┌─────────────────┐   ┌───────▼─────────┐
-                          │ LendingMarket A │   │ LendingMarket B │   │ LendingMarket … │
-                          └─────────────────┘   └─────────────────┘   └─────────────────┘
+                          ┌────────────────────────────────────────────────────────┐
+                          │                  Somnia Agent Platform                  │
+                          │  IAgentRequester · LLM Inference (Qwen3-30B)            │
+                          │  Majority consensus · fixed seed · temp=0 · async cb    │
+                          └──────▲──────────────────────────────────────▲───────────┘
+                                 │ createRequest / handleResponse        │
+           (defensive path)      │                                       │  (offensive path)
+                         ┌───────┴───────┐                      ┌────────┴────────────┐
+                         │  RiskSentinel │                      │ AllocationStrategist │
+                         │ SENTINEL_ROLE │                      │   ALLOCATOR_ROLE     │
+                         │ reads         │                      │ reads effectiveUtil  │
+                         │ effectiveUtil │                      │ from oracle → AI →   │
+                         │ → hard guards │                      │ projection →         │
+                         │ + AI 2nd-opin │                      │ reallocate()         │
+                         └───────┬───────┘                      └────────┬─────────────┘
+                                 │                                        │
+                         ┌───────▼────────────────────────────────────────▼───────────┐
+                         │           CuratedVault (ERC-4626, any ERC-20 asset)         │
+                         │  ── THE CONSTITUTION: invariant enforcement at custody ──   │
+                         │  asset set at deployment · immutable                        │
+                         │  deposit/redeem · share math · timelocked market mgmt       │
+                         │  reallocate(targets) re-validates I-1..I-11 before moving   │
+                         └───────┬────────────────────────────────────────┬────────────┘
+                                 │ supply / withdraw (vault asset)         │ view metrics
+                         ┌───────▼────────────────────────────────────────▼───────────┐
+                         │                  UtilizationOracle                          │
+                         │  TWAP accumulator per market · ring buffer checkpoints      │
+                         │  effectiveUtil = dual-track(spot, twap, spikeToleranceBps)  │
+                         │  permissionless update() · isValid() · SuspiciousSpike evt  │
+                         └───────┬────────────────────────────────────────┬────────────┘
+                                 │ IMarketAdapter.utilizationBps()         │
+                         ┌───────▼──────┐  ┌─────────────────┐  ┌────────▼──────────┐
+                         │ AaveAdapter  │  │ CompoundAdapter  │  │  GenericAdapter   │
+                         └──────┬───────┘  └────────┬─────────┘  └────────┬──────────┘
+                                │                   │                      │
+                         ┌──────▼──────────┐  ┌────▼──────────┐  ┌────────▼──────────┐
+                         │ Aave Pool (any  │  │ Compound cToken│  │MockLendingMarket  │
+                         │ asset reserve)  │  │(any asset)     │  │(any asset, mock)  │
+                         └─────────────────┘  └───────────────┘  └───────────────────┘
 ```
 
-### 5.2 Module responsibilities (single-responsibility split)
+### 5.2 Module responsibilities
 
 | Module | Responsibility | Holds | Trust level |
 |---|---|---|---|
-| `CuratedVault` | Custody, ERC-4626 math, **invariant enforcement**, market registry, risk parameters, atomic `reallocate` | — | Trusted core |
-| `RiskSentinel` | Defensive monitoring; **on-chain hard guards**; AI regime second-opinion; emergency actions | `SENTINEL_ROLE` | Semi-trusted (risk-reducing only, replaceable) |
-| `AllocationStrategist` | Offensive optimization; AI proposal lifecycle; deterministic projection; trigger validated rebalances | `ALLOCATOR_ROLE` | **Untrusted-by-design** (bounded by vault invariants, replaceable) |
+| `CuratedVault` | Custody of **vault asset**, ERC-4626 math, invariant enforcement, market registry, risk parameters, atomic `reallocate` | — | Trusted core |
+| `RiskSentinel` | Defensive monitoring; on-chain hard guards via effectiveUtil; AI regime second-opinion; emergency actions | `SENTINEL_ROLE` | Semi-trusted (risk-reducing only, replaceable) |
+| `AllocationStrategist` | Offensive optimization; AI proposal lifecycle; deterministic projection; trigger validated rebalances | `ALLOCATOR_ROLE` | Untrusted-by-design (bounded by vault invariants, replaceable) |
+| `UtilizationOracle` | TWAP accumulator per market; dual-track filter; IMarketAdapter routing; SuspiciousSpike events | — | Trusted data layer (no custody, no roles) |
+| `IMarketAdapter` | Protocol-specific translation of external market data to standard `utilizationBps` (asset-agnostic) | — | External truth adapter |
 | `ISomnia` | Exact platform + agent interfaces | — | External truth |
-| Mocks | Deterministic test doubles incl. adversarial behavior | — | Test only |
+| Mocks | Deterministic test doubles; configurable asset decimals; flash-spike simulation | — | Test only |
 
-**Why invariants live in the vault, not the Strategist:** if the Strategist enforced its own limits, a bug or compromise in the Strategist would defeat them. By enforcing every `I-*` inside `CuratedVault.reallocate`, the protection is **independent of the proposer**. The Strategist is then free to be "clever" (and even wrong) without ever being "dangerous."
+### 5.3 Design principles
 
-### 5.3 Design principles (the spine of the redesign)
+- **P-1 Deterministic/Probabilistic separation.** Arithmetic on-chain. AI reserved for judgment.
+- **P-2 Constitution at the custody boundary.** Invariants enforced where funds move.
+- **P-3 Most-constrained primitive.** Narrowest AI output that expresses the decision.
+- **P-4 Lossless canonical inputs.** Integer bps, fixed order, no truncation.
+- **P-5 Fail-closed / fail-safe.** AI failure leaves vault in last safe state.
+- **P-6 Least privilege + replaceability.** Each arm holds minimum role; hot-swappable.
+- **P-7 Bounded blast radius.** Maximally adversarial AI can only reshuffle within invariants, once/epoch.
+- **P-8 Auditability.** Every decision emits a structured on-chain record.
+- **P-9 Manipulation-resistant inputs.** No raw spot read as sole threshold input. TWAP required.
+- **P-10 Asset-agnosticism.** *(New v2.2)* No asset-specific logic in any contract. Decimal counts are read from the asset ERC-20 at runtime. All arithmetic is correct for any valid decimal count (0–18).
 
-- **P-1 Deterministic/Probabilistic separation.** If a rule can be written as exact integer arithmetic, it lives on-chain. The AI is reserved for ranking/judgment under multiple weak signals.
-- **P-2 Constitution at the custody boundary.** All depositor-protecting invariants are enforced where funds move (`reallocate`, `allocate`, `deallocate`), not in the proposer.
-- **P-3 Most-constrained primitive.** Use the narrowest AI output that can express the decision (`allowedValues` enum > clamped `inferNumber` > free text > calldata). Narrower = more consensus-safe + smaller attack surface.
-- **P-4 Lossless canonical inputs.** Feed the model integer, fixed-unit (bps), fixed-order, locale-free features. Never truncate the data the decision depends on.
-- **P-5 Fail-closed / fail-safe.** Absence, failure, timeout, or invalidity of an AI response leaves the vault in its last safe state and (for risk) escalates caution, never silently relaxing protection.
-- **P-6 Least privilege + replaceability.** Each AI arm holds the minimum role; each is hot-swappable by admin without redeploying the vault.
-- **P-7 Bounded blast radius.** Even a maximally adversarial, fully-trusted-by-mistake AI proposal can at most reshuffle already-whitelisted, capped funds, within a per-epoch turnover limit, once per epoch.
-- **P-8 Auditability.** Every decision emits a structured, on-chain record: inputs (feature snapshot hash), AI raw output, the projected target, the executed deltas, and the outcome.
+---
+
+### 5.4 Asset-Agnostic Architecture & Market Lifecycle (New v2.2)
+
+This section resolves D-9 and establishes the definitive model for how the vault handles assets and how markets are added.
+
+#### 5.4.1 One vault = one asset
+
+A single `CuratedVault` deployment accepts exactly one ERC-20 asset, set immutably at construction. All lending markets added to that vault must lend and return **that same asset**. The vault is never aware of a second asset type. This is the correct ERC-4626 pattern.
+
+Examples of valid vault deployments:
+- A vault configured with WETH — markets lend WETH, yield paid in WETH
+- A vault configured with USDC — markets lend USDC, yield paid in USDC
+- A vault configured with DAI — markets lend DAI, yield paid in DAI
+
+The current testnet deployment uses USDC for demonstration purposes. The protocol design is not USDC-specific.
+
+#### 5.4.2 Decimal handling
+
+The vault reads `asset.decimals()` once at construction and stores it. All internal arithmetic that involves amounts uses this stored decimal count. The AI feature block always expresses amounts in the asset's own base units (not normalized), with the decimal count included in the portfolio header line so the AI and any observer knows the scale.
+
+The feature block grammar must include the asset's decimal count so the AI does not confuse a WETH amount (18 decimals) with a USDC amount (6 decimals):
+
+```
+PORTFOLIO|ta=<totalAssets>|decimals=<assetDecimals>|idle=<idleBps>|mkts=<count>|...
+```
+
+**Critically:** all *ratios* (utilization, allocation, idle buffer) are in basis points regardless of asset — they are dimensionless and scale-independent. Only absolute amounts (totalAssets) are asset-decimal-dependent. This means the risk thresholds (bps) and AI scoring are completely asset-agnostic.
+
+#### 5.4.3 Market addition lifecycle (the curator process)
+
+Adding a market is a four-stage process controlled by the curator:
+
+```
+Stage 1 — Curator submits (timelocked):
+  curator calls submitAddMarket(market, supplyCap, adapterAddress)
+  → Creates a pending timelock action
+  → Registers the adapter in UtilizationOracle for this market
+  → Emits MarketQueued(id, market, eta)
+  → Wait period: MIN_TIMELOCK to MAX_TIMELOCK (curator-set)
+
+Stage 2 — Timelock expires → execute:
+  Anyone calls executeAddMarket(market, supplyCap, adapterAddress)
+  → Block.timestamp >= eta required
+  → Market enabled in vault registry
+  → Emits MarketEnabled(market, supplyCap)
+
+Stage 3 — Oracle seeding (before first risk check or rebalance):
+  Anyone calls oracle.update(market) repeatedly over TWAP_WINDOW
+  → oracle.isValid(market) returns false until age >= TWAP_WINDOW
+  → During this period: effectiveUtil returns cautionUtilBps (conservative)
+  → Minimum seeding period: TWAP_WINDOW (default 30 minutes)
+
+Stage 4 — Market fully active:
+  oracle.isValid(market) returns true
+  → Market can receive allocations from AllocationStrategist
+  → Market's utilization is fully TWAP-protected
+  → Sentinel monitors it on every checkVault call
+```
+
+**Why the adapter is submitted with the market:** When a curator adds Market X (say, an Aave WETH lending pool), they must also specify which adapter translates that market's data into the standard `utilizationBps()` format. This ties the oracle integration to the market registration atomically — a market cannot be added without its oracle adapter, preventing silent spot-read vulnerabilities on new markets.
+
+**Curator can also:**
+- **Lower a supply cap** (immediate — risk-reducing)
+- **Raise a supply cap** (timelocked — risk-increasing)
+- **Revoke a pending timelock action** (immediate — Sentinel can also do this)
+- **Disable a market** (immediate — stop new allocations; existing funds can still be withdrawn)
 
 ---
 
 ## 6. Domain Model & Canonical Units
 
-### 6.1 Units (eliminates D-3)
+### 6.1 Units (corrected in v2.2 — eliminates D-3 and D-9)
 
-- **All ratios in basis points (bps), 1e4 = 100%.** `utilizationBps`, `allocationBps`, `idleBufferBps`, `minIdleBufferBps`, `maxMarketBps`, `maxTurnoverBps`, `driftToleranceBps`.
-- **All asset amounts in USDC base units (6 decimals).**
-- **All share amounts in 18 decimals** (unchanged).
-- **AI scores in a fixed clamp range** `[0, SCORE_MAX]` with `SCORE_MAX = 10_000` (so a score reads naturally as "weight in bps" before projection).
+- **All ratios in basis points (bps), 1e4 = 100%.** `utilizationBps`, `allocationBps`, `idleBufferBps`, `minIdleBufferBps`, `maxMarketBps`, `maxTurnoverBps`, `driftToleranceBps`, `spikeToleranceBps`. Bps are dimensionless — independent of the vault asset.
+- **All asset amounts in the vault asset's native base units.** The base unit size depends on the asset's decimal count. USDC: 1 unit = 1e-6 USDC. WETH: 1 unit = 1e-18 WETH. WBTC: 1 unit = 1e-8 WBTC. **Never assume 6 decimals.** Always read `asset.decimals()`.
+- **All share amounts in 18 decimals** (ERC-4626 standard, unchanged).
+- **AI scores in a fixed clamp range** `[0, SCORE_MAX]` with `SCORE_MAX = 10_000` — dimensionless, asset-agnostic.
 
 ### 6.2 Core entities
 
-- **Vault** — `totalAssets` (idle + sum of market balances), `totalSupply`, `sharePrice`, `depositsPaused`, risk parameters, market registry, current epoch.
-- **Market** — `enabled`, `supplyCap`, current `balanceOf(vault)`, `utilizationBps`, **`supplyRateBps`** (new yield signal; see §8.5).
-- **RiskParameters** (curator-set; risk-increasing changes timelocked) — `minIdleBufferBps`, `maxMarketBps`, `maxTurnoverBps`, `driftToleranceBps`, `rebalanceEpoch`, plus the **hard risk thresholds** now living on-chain: `criticalUtilBps`, `cautionUtilBps`, `criticalAllocBps`, `cautionAllocBps`, `minHealthyIdleBps`.
+- **Vault** — `asset` (immutable ERC-20 address set at construction), `assetDecimals` (read from asset, stored at construction), `totalAssets`, `totalSupply`, `sharePrice`, `depositsPaused`, risk parameters, market registry, current epoch.
+- **Market** — `enabled`, `supplyCap` (in asset base units), `adapterAddress` (for oracle), current `balanceOf(vault)` (in asset base units), raw `utilizationBps` (spot, from adapter), `supplyRateBps` (yield signal).
+- **MarketObservation** — per-market TWAP state inside UtilizationOracle: `lastSpotUtil`, `lastObservationTime`, `accumulator`, `firstObservationTime`, ring buffer of checkpoint pairs.
+- **RiskParameters** (curator-set; risk-increasing changes timelocked) — `minIdleBufferBps`, `maxMarketBps`, `maxTurnoverBps`, `driftToleranceBps`, `rebalanceEpoch`, `criticalUtilBps`, `cautionUtilBps`, `criticalAllocBps`, `cautionAllocBps`, `minHealthyIdleBps`, `spikeToleranceBps`, `TWAP_MIN_WINDOW`.
 - **Proposal** — `{requestId, vault, epoch, snapshotHash, rawAiOutput, projectedTargets[], status}` for audit.
 
 ---
@@ -259,51 +360,49 @@ Anchoring the new allocator in battle-tested DeFi:
 
 ### 7.1 Objective
 
-Detect dangerous vault states and *reduce* risk autonomously, with **on-chain determinism as the authority** and **AI as a layered escalator** — resolving D-1, D-5, and the §2.3 prompt critique.
+Detect dangerous vault states and reduce risk autonomously. On-chain determinism is the authority; AI is a layered escalator. Resolves D-1, D-5, D-8, D-9, and the §2.3 prompt critique. All utilization readings go through the UtilizationOracle (§7.7).
 
 ### 7.2 What moves on-chain (deterministic hard guards)
 
-`RiskSentinel.assessOnChain(vault)` (pure view over vault metrics) computes, in bps, with **no truncation**:
+`RiskSentinel.assessOnChain(vault)` computes, in bps, with no truncation:
 
-- `maxUtilBps` = max over enabled markets of `utilizationBps`.
-- `maxAllocBps` = max over enabled markets of `balanceOf(vault) * 1e4 / totalAssets`.
-- `idleBps` = `idleAssets * 1e4 / totalAssets`.
-- A deterministic **HardLevel ∈ {Safe, Caution, Critical}** from curator-set thresholds:
-  - **Critical** if `maxUtilBps > criticalUtilBps` **or** `maxAllocBps > criticalAllocBps` **or** `idleBps < minHealthyIdleBps`.
-  - **Caution** if any value sits in the caution band.
-  - **Safe** otherwise.
-- The **true worst market** = argmax utilization (fixes **D-1**), returned alongside.
+- For each enabled market: call `oracle.update(market)` then read `effectiveUtil = oracle.effectiveUtil(market)`.
+- `maxEffectiveUtilBps` = max over enabled markets of `effectiveUtil`.
+- `maxAllocBps` = max over enabled markets of `balanceOf(vault) * 1e4 / totalAssets`. *(Vault-internal — not flash-loan manipulable.)*
+- `idleBps` = `idleAssets * 1e4 / totalAssets`. *(Vault-internal — not flash-loan manipulable.)*
+- A deterministic **HardLevel ∈ {Safe, Caution, Critical}** from curator-set thresholds.
 
-These guards fire **regardless of the AI** and are the **authoritative trigger for emergency action** (resolves **D-5**: on-chain is authoritative; AI is additive).
+These guards fire **regardless of the AI** and are the **authoritative trigger for emergency action**.
 
-### 7.3 What the AI actually decides (the judgment worth buying)
+### 7.3 What the AI actually decides
 
-The AI is asked a question arithmetic cannot answer well: **"Across the whole portfolio and its recent trajectory, is this a deteriorating risk regime that warrants caution beyond what any single threshold shows?"**
+The AI is asked: **"Is this a deteriorating risk regime beyond what any single threshold shows?"**
 
 - Primitive: `inferString` with `allowedValues = ["STABLE","WATCH","DETERIORATING"]`.
-- Input: the **canonical feature block** (§9.3) including *cross-market* and *trend* features (e.g., number of markets in the caution band, dispersion of utilization, change since last snapshot) — signals that are genuinely pattern-like rather than single-threshold.
-- The AI's answer is an **escalation modifier**, not a trigger:
+- Input: canonical feature block (§9.3) including twap, spike, and trend signals.
+- The AI's answer is an **escalation modifier only**.
 
-### 7.4 Precedence rule (one clear rule — resolves D-5)
+### 7.4 Precedence rule (resolves D-5)
 
 ```
 EffectiveLevel = max(HardLevel_onchain, AiAdjustedLevel)
 
 where AiAdjustedLevel =
-   Critical  if AI == DETERIORATING and HardLevel >= Caution     (AI can escalate Caution→Critical)
-   Caution   if AI == WATCH        and HardLevel == Safe          (AI can nudge Safe→Caution)
-   HardLevel otherwise                                            (AI can never DE-escalate)
-```
+   Critical  if AI == DETERIORATING and HardLevel >= Caution
+   Caution   if AI == WATCH        and HardLevel == Safe
+   HardLevel otherwise
 
-**The AI can only raise caution, never lower it.** If the AI is unavailable/timeout/failed → `EffectiveLevel = HardLevel` (and we still record `AI_UNAVAILABLE` for the trail). This preserves P-5.
+AI failure/timeout/unknown → EffectiveLevel = HardLevel (AI_UNAVAILABLE recorded)
+AI can NEVER lower the effective level — only raise it.
+```
 
 ### 7.5 Action mapping
 
 | EffectiveLevel | On-chain action |
 |---|---|
 | Safe | Store snapshot; no action. |
-| Caution | Store snapshot; emit `RiskAlert`. *(Optionally: lower the cap of the worst market by a curator-set step — risk-reducing, allowed for Sentinel.)* |
-| Critical | `pauseDeposits()` (if `autoPauseEnabled`); `emergencyDeallocate(worstMarket, pullBps × balance / 1e4)` on the **true** worst market; emit events. Pull fraction `pullBps` is a curator parameter (default 50%), and the action is gated on **on-chain** util/alloc, not on the AI word. |
+| Caution | Store snapshot; emit `RiskAlert`. Optionally lower worst-market cap. |
+| Critical | `pauseDeposits()` (if autoPauseEnabled); `emergencyDeallocate(worstMarket, pullBps × balance / 1e4)` on true worst market (argmax effectiveUtil); emit events. |
 
 ### 7.6 Sentinel state machine
 
@@ -325,222 +424,341 @@ where AiAdjustedLevel =
     └────────────────────────────┘
 ```
 
-Keep from v1: `CHECK_COOLDOWN` (5 min), one in-flight per vault (`activeRequest`), `onlyPlatform`, `pendingRequests` public, immutable history snapshots, `getLatestRisk`/`getHistory`/`getVaultList`/`isCheckPending` views.
+Keep from v1: `CHECK_COOLDOWN` (5 min), one in-flight per vault, `onlyPlatform`, `pendingRequests` public, immutable history snapshots, view functions.
 
 ---
 
-## 8. The AllocationStrategist (offensive path — the new brain)
+### 7.7 UtilizationOracle — Manipulation-Resistant Utilization
+
+#### 7.7.1 Purpose
+
+Solves D-8. External lending markets expose only spot utilization — manipulable in one block via flash loans. The oracle wraps any external market and maintains a TWAP using the Uniswap V2 accumulator pattern applied to utilization instead of price. Works for any asset type.
+
+**Why TWAP defeats flash loans:** A 2-second spike contributes `2/1800 = 0.1%` of a 30-minute window's weight. A 2000 bps spike moves the TWAP by ≤ 2 bps. **Why two-block defense fails:** Attacker can manipulate both blocks independently with flash loans. TWAP contains history across many blocks — attacker cannot rewrite that history.
+
+#### 7.7.2 IMarketAdapter — asset-agnostic external protocol abstraction
+
+```
+interface IMarketAdapter {
+    function utilizationBps(address market) external view returns (uint256);
+}
+```
+
+Adapter implementations (spec, not code — asset-agnostic in all cases):
+
+- **AaveAdapter** — reads `getReserveData(asset)`, computes `(variableDebt + stableDebt) × 10000 / (totalDebt + availableLiquidity)`. Works for any Aave reserve asset.
+- **CompoundAdapter** — reads `totalBorrows()`, `getCash()`, `totalReserves()`, computes `borrows × 10000 / (cash + borrows - reserves)`. Works for any cToken asset.
+- **GenericAdapter** — for markets that directly expose `utilizationBps()` (mocks, simple implementations).
+
+The curator registers an adapter per market during `submitAddMarket`. The oracle uses the registered adapter for that market regardless of what asset it holds.
+
+#### 7.7.3 Oracle data structure per market
+
+```
+struct MarketObservation {
+    uint256 lastSpotUtil
+    uint256 lastObservationTime
+    uint256 accumulator            // cumulative sum of (util × elapsed seconds)
+    uint256 firstObservationTime
+    bool    initialized
+    uint256[7] checkpointAccumulator  // ring buffer for sliding-window TWAP
+    uint256[7] checkpointTimestamp
+    uint8   checkpointHead
+}
+```
+
+#### 7.7.4 Oracle update() logic
+
+```
+function update(address market) external {
+    MarketObservation storage obs = _observations[market];
+    uint256 spotNow = IMarketAdapter(adapters[market]).utilizationBps(market);
+    uint256 timeNow = block.timestamp;
+
+    if (!obs.initialized) {
+        obs.lastSpotUtil         = spotNow;
+        obs.lastObservationTime  = timeNow;
+        obs.firstObservationTime = timeNow;
+        obs.initialized          = true;
+        _writeCheckpoint(obs, 0, timeNow);
+        return;
+    }
+
+    uint256 elapsed = timeNow - obs.lastObservationTime;
+    if (elapsed == 0) return; // same block, no-op
+
+    obs.accumulator          += obs.lastSpotUtil * elapsed;
+    obs.lastSpotUtil         = spotNow;
+    obs.lastObservationTime  = timeNow;
+
+    uint256 lastCpTime = obs.checkpointTimestamp[(obs.checkpointHead + 6) % 7];
+    if (timeNow - lastCpTime >= 5 minutes) {
+        _writeCheckpoint(obs, obs.accumulator, timeNow);
+    }
+}
+```
+
+`update` is **permissionless** — any address, no role required.
+
+#### 7.7.5 Oracle twap() logic
+
+```
+function twap(address market, uint256 window) external view returns (uint256) {
+    MarketObservation storage obs = _observations[market];
+    if (!obs.initialized) return cautionUtilBps;
+    if (block.timestamp - obs.firstObservationTime < window) return cautionUtilBps;
+
+    uint256 targetTime = block.timestamp - window;
+    (uint256 cpAcc, uint256 cpTime) = _findCheckpointAt(obs, targetTime);
+
+    uint256 elapsed    = block.timestamp - obs.lastObservationTime;
+    uint256 currentAcc = obs.accumulator + (obs.lastSpotUtil * elapsed);
+    uint256 accDelta   = currentAcc - cpAcc;
+    uint256 timeDelta  = block.timestamp - cpTime;
+    if (timeDelta == 0) return obs.lastSpotUtil;
+
+    return accDelta / timeDelta;
+}
+```
+
+#### 7.7.6 The dual-track filter — effectiveUtil()
+
+```
+function effectiveUtil(address market)
+    external returns (uint256 util, bool spikeDetected)
+{
+    this.update(market);
+    uint256 spot    = IMarketAdapter(adapters[market]).utilizationBps(market);
+    uint256 twapVal = this.twap(market, TWAP_WINDOW);
+    uint256 delta   = spot > twapVal ? spot - twapVal : 0;
+
+    if (delta > spikeToleranceBps) {
+        emit SuspiciousSpike(market, spot, twapVal, delta, block.timestamp);
+        return (twapVal, true);
+    }
+    if (spot > criticalUtilBps && twapVal > cautionUtilBps) {
+        return (spot, false); // real sustained emergency — secondary rule
+    }
+    return (spot, false); // spot and twap agree
+}
+```
+
+| Condition | effectiveUtil | spikeDetected | Rationale |
+|---|---|---|---|
+| `spot - twap > spikeToleranceBps` | TWAP | true | Manipulation detected. Use trusted average. |
+| `spot > criticalUtil AND twap > cautionUtil` | spot | false | Real sustained emergency. Both elevated. Act fast. |
+| Otherwise | spot | false | Readings agree. Use current value. |
+
+#### 7.7.7 Oracle parameters (curator-set)
+
+| Parameter | Default | Change type |
+|---|---|---|
+| `TWAP_WINDOW` | 30 minutes | Risk-reducing (reduce) = immediate; risk-increasing (increase) = timelocked |
+| `spikeToleranceBps` | 1000 (10%) | Tightening (reduce) = immediate; loosening (increase) = timelocked |
+| `cautionUtilBps` | 8000 (80%) | Timelocked |
+| `criticalUtilBps` | 9500 (95%) | Timelocked |
+
+#### 7.7.8 Oracle liveness
+
+If `update` is not called for extended periods, the TWAP reflects the last known spot held constant — conservative if healthy, cautious if already in caution band. The sentinel calls `update` on every `checkVault`, so oracle is refreshed at minimum every 5 minutes during active monitoring.
+
+#### 7.7.9 isValid()
+
+```
+function isValid(address market) external view returns (bool) {
+    MarketObservation storage obs = _observations[market];
+    if (!obs.initialized) return false;
+    return (block.timestamp - obs.firstObservationTime) >= TWAP_WINDOW;
+}
+```
+
+Until `isValid` is true, `twap()` returns `cautionUtilBps`. New markets are treated conservatively until enough real history accumulates (§5.4.3 Stage 3).
+
+---
+
+## 8. The AllocationStrategist (offensive path)
 
 ### 8.1 Objective
 
-Autonomously improve **risk-adjusted yield** by proposing how the vault's assets should be distributed across enabled markets and idle, then executing the proposal **only through the vault's invariant-checked `reallocate`**.
+Autonomously improve risk-adjusted yield across the vault's configured asset by proposing target allocations, then executing only through the vault's invariant-checked `reallocate`. The strategist reads utilization from `UtilizationOracle.effectiveUtil()` — manipulation-resistant, asset-agnostic. Works identically regardless of whether the vault holds USDC, WETH, or any other asset.
 
-### 8.2 The trust architecture (this is the crux of the whole request)
+### 8.2 Trust architecture
 
 ```
-   AI proposes  ──►  Strategist projects onto feasible set  ──►  Vault re-validates EVERY invariant  ──►  executes
-   (untrusted)       (deterministic, off-the-money math)        (the constitution, at custody)            (atomic, CEI)
-        │                       │                                        │
-   weights/scores         caps + idle + concentration             rejects if ANY I-* fails
-   (bounded ints)         + turnover applied here too              (fail-closed, funds stay put)
+AI proposes ──► Strategist projects onto feasible set ──► Vault re-validates ALL invariants ──► executes
+(untrusted)     (deterministic math, asset-agnostic)      (the constitution, at custody)         (atomic, CEI)
+
+All util inputs: UtilizationOracle.effectiveUtil() — manipulation-resistant
+All amount math: uses vault.assetDecimals — correct for any asset
 ```
 
-The AI never names an amount of money. It emits **dimensionless preferences** (a strategy label or per-market scores). The Strategist turns preferences into a **candidate target vector**. The vault turns the candidate into **money movement only if it satisfies the constitution**. Three independent layers; each strictly narrows the previous.
-
-### 8.3 Tiered allocation modes (ship safe, design for better)
-
-The implementer MUST build **Tier-1** and **Tier-2**; **Tier-3** is documented future work (§20).
+### 8.3 Tiered allocation modes
 
 **Tier-1 — Strategy Selection (default; cheapest; maximal consensus safety).**
-- One `inferString` call. `allowedValues` is a curated, fixed enum of **named allocation policies**, e.g.:
-  - `DEFENSIVE` — maximize idle/liquidity; allocate minimally, prefer lowest-utilization market.
-  - `BALANCED` — even risk-weighted spread across healthy markets.
-  - `YIELD_TILT` — overweight highest `supplyRateBps` markets that remain under caution thresholds.
-  - `DERISK` — pull toward idle floor + lowest-utilization market only.
-- The EVM maps the chosen label to **target weights via a deterministic, pure function** over the *current* market set and features. One word in, a fully determined feasible target out. Bulletproof: same primitive that already works for the risk verdict.
+One `inferString` call. `allowedValues = ["DEFENSIVE","BALANCED","YIELD_TILT","DERISK"]`. EVM maps label to deterministic weights. One word, fully determined outcome. Bulletproof consensus.
 
 **Tier-2 — Per-Market Scoring (higher fidelity).**
-- For each enabled market `i`, an `inferNumber` call returns an **attractiveness score** in `[0, SCORE_MAX]`, clamped, given that market's canonical features + the portfolio context. Single integer per call → consensus-safe.
-- The EVM normalizes scores to weights and **projects onto the feasible set** (§11). The AI expresses *relative* preference; the EVM owns *all* the money math.
-- Cost scales with market count (N × 0.07 × subSize). Acceptable for the 2–5 markets typical on testnet; documented as the precision/cost trade vs Tier-1.
+One `inferNumber` call per market. Score clamped `[0, SCORE_MAX]`. EVM normalizes to weights and projects onto feasible set (§11). N × cost vs Tier-1.
 
-**Tier-3 — Tool-Calling Allocator (future, NG-3).**
-- `inferToolsChat` yields candidate moves/calldata; the vault would still re-validate every move against `I-*`. Deferred because free-form calldata is the weakest consensus case and the largest attack surface. See §20.
+**Tier-3 — Tool-Calling Allocator (future, NG-3).** `inferToolsChat`. Deferred — see §20.
 
-> **Selection guidance for the implementer:** make the tier a **curator-set mode** on the Strategist (`AllocationMode` enum), defaulting to Tier-1. Tests MUST cover both Tier-1 and Tier-2 end-to-end, including adversarial AI outputs.
+> Make tier a curator-set mode (`AllocationMode` enum), defaulting to Tier-1.
 
 ### 8.4 Rebalance lifecycle (sequence)
 
 ```
-Keeper/anyone                Strategist                    Platform (LLM)                 CuratedVault
-     │  requestRebalance(vault){STT}  │                            │                            │
-     │───────────────────────────────►│  snapshot features (bps)   │                            │
-     │                                │  epochGuard, snapshotHash   │                            │
-     │                                │  createRequest{value}(...)  │                            │
-     │                                │───────────────────────────►│                            │
-     │           requestId            │                            │  validators run Qwen3-30B  │
-     │◄───────────────────────────────│                            │  (seed fixed, temp=0)      │
-     │                                │   handleResponse(reqId,...) │                            │
-     │                                │◄───────────────────────────│  Majority consensus        │
-     │                                │ decode label/scores         │                            │
-     │                                │ staleness check (I-10)      │                            │
-     │                                │ project → targets[]         │                            │
-     │                                │  reallocate(targets, guard) │                            │
-     │                                │────────────────────────────────────────────────────────►│
-     │                                │                            │  re-validate I-1..I-10      │
-     │                                │                            │  execute minimal deltas     │
-     │                                │      Rebalanced / Rejected  │  (CEI, nonReentrant)        │
-     │                                │◄────────────────────────────────────────────────────────│
+Keeper/anyone             Strategist                     Platform (LLM)               CuratedVault
+     │ requestRebalance(){STT}  │                              │                           │
+     │─────────────────────────►│ oracle.update(all markets)   │                           │
+     │                          │ read effectiveUtil per mkt   │                           │
+     │                          │ snapshot features (bps)      │                           │
+     │                          │ epochGuard, snapshotHash     │                           │
+     │                          │ createRequest{value}(...)    │                           │
+     │                          │─────────────────────────────►│                           │
+     │         requestId        │                              │ validators run Qwen3-30B  │
+     │◄─────────────────────────│                              │ (seed fixed, temp=0)      │
+     │                          │  handleResponse(reqId,...)   │                           │
+     │                          │◄─────────────────────────────│ Majority consensus        │
+     │                          │ decode label/scores          │                           │
+     │                          │ staleness check (I-10)       │                           │
+     │                          │ project → targets[]          │                           │
+     │                          │  reallocate(targets, guard)  │                           │
+     │                          │────────────────────────────────────────────────────────►│
+     │                          │                              │ re-validate I-1..I-11     │
+     │                          │                              │ execute minimal deltas    │
+     │                          │     Rebalanced / Rejected    │ (CEI, nonReentrant)       │
+     │                          │◄────────────────────────────────────────────────────────│
 ```
 
-**Fail-safe branches:** `Failed`/`TimedOut`/empty → emit `RebalanceSkipped(reason)`, no movement. Invariant rejection inside `reallocate` → revert with reason or emit `RebalanceRejected(invariantId)` and leave funds untouched. Either way the vault stays in its last safe allocation (P-5).
+Fail-safe: `Failed`/`TimedOut`/empty → `RebalanceSkipped(reason)`, no movement. Invariant rejection → `RebalanceRejected(invariantId)`, funds untouched.
 
-### 8.5 The yield signal (objective-function input without external oracles)
+### 8.5 The yield signal
 
-The Strategist needs a per-market "attractiveness" signal beyond utilization. To honor NG-1 (no mandatory external oracle) while staying realistic:
+Primary: `supplyRateBps()` on each market — current supply APY in bps. On-chain view, not flash-loan manipulable (derives from the market's interest rate model). Asset-agnostic: a bps rate means the same thing whether the market holds WETH or USDC. The mock computes it from a settable interest model (§14.3).
 
-- **Primary:** add `supplyRateBps()` to the market interface — the market's *current supply APY in bps*. Real lending markets expose this; the mock computes it from its interest model (§14.3). This is an on-chain view, consensus-trivial.
-- **Optional augmentation (documented, not required):** a Somnia **JSON API agent** (`fetchUint`, 0.03/validator) could pull an external benchmark rate; if used, it MUST be treated as just another *feature*, never as a constraint, and the design must tolerate its absence. Keep this behind a flag; v2 core uses only on-chain `supplyRateBps`.
+### 8.6 Why not let the AI move funds directly?
 
-### 8.6 Why not just let the AI move funds directly?
-
-Because that would make the AI a treasurer, not an advisor (violates the Golden Rule, P-2, P-7). The requested architecture — and the correct one — is: **AI as untrusted ALLOCATOR proposing arrays; EVM validates against hard invariants before any physical routing.** §10 specifies those invariants formally; §11 specifies the deterministic projection that makes any AI output *feasible by construction or rejected*.
+That makes the AI a treasurer, not an advisor (violates the Golden Rule, P-2, P-7). §10 specifies invariants; §11 specifies the deterministic projection.
 
 ---
 
-## 9. Prompt Engineering Strategy (the explicit fix for the stated problem)
-
-This section is the heart of "the prompt strategy is not well-defined." It applies to **both** AI arms.
+## 9. Prompt Engineering Strategy
 
 ### 9.1 The five prompt-design laws
 
-- **L-1 Decide what the AI is for.** Only ask the model questions arithmetic can't answer (regime judgment, relative ranking). Never ask it to evaluate a fixed numeric threshold — that's on-chain (P-1).
-- **L-2 Lossless canonical input.** Integers only, basis points, fixed field order, fixed units, no locale formatting, no truncation, markets always serialized in **canonical order** (e.g., ascending market index). Determinism of the *input string* across validators is as important as the model's determinism.
-- **L-3 Constrained output.** `inferString` with `allowedValues` (enum) or `inferNumber` with a clamp range. Never free-form for a decision that drives money. `chainOfThought=false` for single-shot decisions (a visible thought stream is extra tokens that can diverge across validators and break Majority consensus).
-- **L-4 Unambiguous rubric.** The system prompt specifies the mapping from features to the allowed outputs with explicit, closed definitions and explicit boundary handling — but only over the *judgment* dimension, since thresholds are on-chain.
-- **L-5 Pin and test the prompt.** The exact system prompt and the feature-encoding grammar are **constants with unit tests** (golden-string tests). A prompt change is a reviewed, versioned event (`PROMPT_VERSION` recorded in the audit trail).
+- **L-1** Only ask what arithmetic cannot answer.
+- **L-2** Lossless canonical input. Integers only, bps, fixed field order, canonical market ordering.
+- **L-3** Constrained output. Never free-form for a decision that drives money.
+- **L-4** Unambiguous rubric. Defines each output qualitatively — thresholds are on-chain.
+- **L-5** Pin and test the prompt. Exact text is a versioned constant with unit tests.
 
-### 9.2 Determinism checklist (consensus-safety; MUST pass before mainnet)
+### 9.2 Determinism checklist (MUST pass before mainnet)
 
-- [ ] Output is enum-constrained or clamped-integer (never free text driving funds).
-- [ ] `chainOfThought=false` on consensus-critical calls (or justified + tested if on).
-- [ ] Feature string is byte-identical for identical chain state (no addresses unless lowercased/checksum-fixed, no timestamps inside the prompt, canonical market ordering).
-- [ ] No floating point anywhere; bps integers only.
+- [ ] Output is enum-constrained or clamped-integer.
+- [ ] `chainOfThought=false` on consensus-critical calls.
+- [ ] Feature string is byte-identical for identical chain state.
+- [ ] No floating point; bps integers only.
 - [ ] Prompt + system are compile-time constants except for the feature block.
-- [ ] `allowedValues` enumerated exactly and matched on-chain by `keccak256` comparison.
+- [ ] `allowedValues` matched on-chain by `keccak256`.
 
-### 9.3 Canonical feature-block grammar (lossless, fixed)
-
-Define a single, pinned grammar used by both arms. Conceptually (the implementer renders this deterministically; exact rendering is unit-pinned):
+### 9.3 Canonical feature-block grammar (corrected in v2.2 — eliminates D-9)
 
 ```
-PORTFOLIO|ta=<totalAssetsUSDC>|idle=<idleBps>|mkts=<count>|epoch=<n>
-M<i>|util=<utilBps>|alloc=<allocBps>|cap=<capHeadroomBps>|rate=<supplyRateBps>
+PORTFOLIO|ta=<totalAssets>|decimals=<assetDecimals>|idle=<idleBps>|mkts=<count>|epoch=<n>|prev_idle=<idleBps_lastSnapshot>
+AGGREGATE|mkts_near_caution=<count>|util_dispersion=<maxUtil-minUtil>|alloc_dispersion=<maxAlloc-minAlloc>
+M<i>|util=<effectiveUtilBps>|twap=<twapUtilBps>|spike=<0|1>|alloc=<allocBps>|headroom=<capHeadroomBps>|rate=<supplyRateBps>
 M<i+1>|...
 ```
 
-- `capHeadroomBps` = remaining room under the supply cap, in bps of totalAssets, so the model sees how much *can* be added without the EVM clipping it.
-- Markets emitted in ascending index order, every time.
-- All values integers, bps where ratios, USDC base units where amounts.
+**Changes from v2.1:**
+- `ta` field: was `ta=<totalAssetsUSDC>` — now `ta=<totalAssets>` (asset-agnostic label)
+- `decimals` field: **new** — tells the AI the scale of the `ta` amount. Critical for correct AI reasoning when vaults hold assets of different decimal counts.
+- All ratio fields remain bps — scale-independent, unchanged.
 
-This replaces the v1 human-sentence prompt and the buggy `_u` formatter (fixes **D-2**) and never truncates (fixes **D-3**).
+Markets emitted in ascending index order, every time. All values integers.
 
 ### 9.4 System prompts (semantic specification — implementer pins exact text)
 
 **RiskSentinel regime classifier** (`allowedValues=["STABLE","WATCH","DETERIORATING"]`):
-- Role: "You are a portfolio-risk regime classifier for a lending vault. You are given canonical integer features in basis points. The contract already enforces all hard numeric limits; your job is to judge the *overall trajectory and concentration* of risk that no single limit captures."
-- Output exactly one of the allowed words. Define each word qualitatively (e.g., DETERIORATING = multiple markets crowding their caution bands and/or rising utilization dispersion). No numbers in the output, no punctuation, no explanation.
+
+> "You are a portfolio-risk regime classifier for a yield vault. Inputs are canonical integer features in basis points; amounts are in the vault's native asset units with decimal count provided. The smart contract already enforces every hard numeric limit. Judge only the overall trajectory and concentration of risk no single limit captures. A spike=1 means a flash-loan manipulation was detected — factor this as an additional risk signal. Output exactly one of: STABLE, WATCH, DETERIORATING. No other text."
 
 **AllocationStrategist Tier-1 selector** (`allowedValues=["DEFENSIVE","BALANCED","YIELD_TILT","DERISK"]`):
-- Role: "You are a capital-allocation policy selector for a lending vault. Choose the single policy best matching current conditions. The contract converts your choice into a concrete, cap-respecting allocation; you only choose the policy."
-- Define each policy's intent precisely and the conditions favoring it (e.g., DERISK when any market is near its caution utilization; YIELD_TILT only when all markets are comfortably below caution and rate dispersion is meaningful).
 
-**AllocationStrategist Tier-2 scorer** (`inferNumber`, clamp `[0, 10000]`):
-- Role: "Given this market's features in the portfolio context, output a single integer attractiveness score in [0,10000], higher = more capital deserved, penalizing high utilization and rewarding higher supply rate, but never exceeding what the cap allows."
-- The clamp + single-integer output is the consensus guarantee.
+> "You are a capital-allocation policy selector for a yield vault. The contract converts your choice into a concrete, cap-respecting allocation in the vault's native asset. The util field is manipulation-resistant (time-weighted). Prefer DERISK or DEFENSIVE when any market nears caution utilization, has spike=1, or the idle buffer is thin. Prefer YIELD_TILT only when all markets are comfortably healthy and rate differences are meaningful. Output exactly one policy word. No other text."
+
+**AllocationStrategist Tier-2 scorer** (`inferNumber`, clamp `[0,10000]`):
+
+> "Given one market's features in the portfolio context, output a single integer attractiveness score in [0,10000]. Reward higher supply rate, penalize higher effective utilization and thin cap headroom. If spike=1, penalize more severely. Output only the integer."
 
 ### 9.5 Output parsing
 
-- `inferString`: compare `keccak256(bytes(result))` against the pinned enum hashes; **unknown → fail-safe** (RiskSentinel: treat as `WATCH`/no-deescalation; Strategist: treat as `DEFENSIVE`/abort rebalance). Never trust an unrecognized word.
-- `inferNumber`: decode to `uint256`, **re-clamp on-chain** to `[0, SCORE_MAX]` defensively (do not assume the agent clamped).
+- `inferString`: compare `keccak256(bytes(result))` against pinned enum hashes. Unknown → fail-safe.
+- `inferNumber`: decode to `uint256`, re-clamp on-chain to `[0, SCORE_MAX]` defensively.
 
 ---
 
 ## 10. The Invariant System (the constitution — formal)
 
-These are enforced **inside `CuratedVault.reallocate(targets, guard)`** and the existing allocate/deallocate paths. If **any** fails, the whole reallocation reverts/rejects atomically (fail-closed). This is what makes the AI safe to be untrusted.
+Enforced **inside `CuratedVault.reallocate(targets, guard)`**. If any fails, the whole reallocation reverts atomically. All amount comparisons use `assetDecimals`-consistent arithmetic — invariants hold for any asset.
 
 | ID | Invariant | Formal statement | Rationale |
 |---|---|---|---|
-| **I-1** | **Conservation** | `Σ target_i + targetIdle == totalAssets` (within a defined rounding epsilon; rounding favors idle) | No funds created/destroyed; reallocation is a permutation of existing assets. |
-| **I-2** | **Cap compliance** | `∀i: target_i ≤ supplyCap_i` | MetaMorpho's core guarantee; AI can never over-expose a market. |
-| **I-3** | **Idle floor** | `targetIdle ≥ minIdleBufferBps × totalAssets / 1e4` | Guarantees withdrawal liquidity; prevents redeem failures/forced unwinds (fixes D-7). |
-| **I-4** | **Max concentration** | `∀i: target_i ≤ maxMarketBps × totalAssets / 1e4` | Diversification limit independent of (possibly generous) caps. |
-| **I-5** | **Whitelist** | `∀i ∉ enabledMarkets: target_i == 0` | Funds only ever sit in curator-approved markets. |
-| **I-6** | **Turnover bound** | `Σ |target_i − current_i| ≤ maxTurnoverBps × totalAssets / 1e4` | Bounds churn, gas, MEV, and the blast radius of a single bad proposal (P-7). |
-| **I-7** | **Liquidity-aware moves** | Every withdrawal ≤ market's redeemable balance; partial-fill or revert, never silent shortfall | Markets may be illiquid; never assume full withdrawability. |
-| **I-8** | **Epoch / cooldown** | One executed rebalance per `rebalanceEpoch` per vault | Anti-thrash, anti-DoS, predictable cadence. |
-| **I-9** | **Pause respect** | If `depositsPaused`, allocation *into* markets is forbidden; deallocation still allowed | Don't add risk while the circuit-breaker is tripped. |
-| **I-10** | **Staleness guard** | `|totalAssets_now − totalAssets_atRequest| ≤ driftToleranceBps × totalAssets_atRequest / 1e4`, and `epoch_now == epoch_atRequest` | The AI judged a snapshot; reject if reality drifted materially (sandwich/large flow between request and callback). |
+| **I-1** | **Conservation** | `Σ target_i + targetIdle == totalAssets` (within rounding epsilon; rounding favors idle) | No funds created/destroyed in the vault asset. |
+| **I-2** | **Cap compliance** | `∀i: target_i ≤ supplyCap_i` | Curator-set cap in asset base units. AI cannot exceed it. |
+| **I-3** | **Idle floor** | `targetIdle ≥ minIdleBufferBps × totalAssets / 1e4` | Withdrawal liquidity in vault asset. Fixes D-7. |
+| **I-4** | **Max concentration** | `∀i: target_i ≤ maxMarketBps × totalAssets / 1e4` | Diversification independent of caps. |
+| **I-5** | **Whitelist** | `∀i ∉ enabledMarkets: target_i == 0` | Funds only in curator-approved markets. |
+| **I-6** | **Turnover bound** | `Σ |target_i − current_i| ≤ maxTurnoverBps × totalAssets / 1e4` | Bounds churn, gas, MEV, blast radius. |
+| **I-7** | **Liquidity-aware moves** | Every withdrawal ≤ market's redeemable balance | Markets may be illiquid. |
+| **I-8** | **Epoch / cooldown** | One executed rebalance per `rebalanceEpoch` per vault | Anti-thrash, anti-DoS. |
+| **I-9** | **Pause respect** | If `depositsPaused`, allocation into markets forbidden; deallocation allowed | No new risk during circuit-breaker. |
+| **I-10** | **Staleness guard** | `|totalAssets_now − totalAssets_atRequest| ≤ driftToleranceBps × totalAssets_atRequest / 1e4` AND `epoch_now == epoch_atRequest` | Reject proposals built on stale snapshots. |
+| **I-11** | **Manipulation resistance** | Sentinel and strategist MUST read `oracle.effectiveUtil(market)`, never raw spot. `effectiveUtil` MUST use TWAP when `spot - twap > spikeToleranceBps`. For a ≤2-second flash-loan spike in a 30-minute window, `effectiveUtil` MUST differ from baseline by ≤ `spikeToleranceBps / 2`. | Defeats flash-loan manipulation (D-8). |
+| **I-12** | **Asset conservation** *(New v2.2)* | The only ERC-20 that ever enters or leaves the vault's `asset` balance is `vault.asset()`. No other token is ever approved, transferred, or tracked by the vault. Lending markets enabled in the vault MUST accept and return the same asset as `vault.asset()`. | Ensures single-asset integrity. A market that returns a different token is not a valid Ephor market. |
 
-Supporting non-AI invariants (retained from v1, restated): ERC-4626 share math via virtual offsets; CEI ordering; `nonReentrant` on all external state-changing entrypoints; role gating; timelock for risk-increasing curator actions.
-
-**Rounding policy:** floor when allocating to markets, ceil when computing the required idle floor — always round in the depositor's favor so I-1/I-3 can't be gamed by dust.
+**Rounding policy:** floor when allocating to markets, ceil for idle floor — round in depositor's favor.
 
 ---
 
 ## 11. The Deterministic Allocation Projection (the math)
 
-This pure function converts *any* AI output into a **feasible** target or proves none exists (→ stay defensive). It runs in the Strategist (off-the-money) and its result is **re-checked** by the vault (I-1..I-10).
+Asset-agnostic — all amounts in asset base units, all ratios in bps. Correct for any decimal count.
 
-**Inputs:** `A = totalAssets`; per enabled market `i`: current balance `b_i`, cap `c_i`; risk params `minIdleBufferBps (fIdle)`, `maxMarketBps (mMax)`, `maxTurnoverBps (tMax)`; AI weights `w_i ≥ 0` (Tier-2 scores, or Tier-1 policy-derived weights).
+**Inputs:** `A = totalAssets` (in asset base units); per market `i`: `b_i` (current balance), `c_i` (supply cap); risk params `fIdle, mMax, tMax`; AI weights `w_i ≥ 0`.
 
-**Step 1 — Budget.** Allocatable budget `B = A − ceil(fIdle × A / 1e4)`. (Reserve the idle floor first; I-3 holds by construction.)
+**Step 1 — Budget.** `B = A − ceil(fIdle × A / 1e4)`. I-3 holds by construction.
 
-**Step 2 — Per-market ceiling.** `u_i = min(c_i, floor(mMax × A / 1e4))`. (Encodes I-2 and I-4 together.)
+**Step 2 — Per-market ceiling.** `u_i = min(c_i, floor(mMax × A / 1e4))`. Encodes I-2 and I-4 together.
 
-**Step 3 — Desired split.** If `Σ w_j == 0` → all weights zero → `target_i = 0 ∀i`, everything idle (fully defensive; valid). Else desired `d_i = floor(w_i × B / Σ w_j)`.
+**Step 3 — Desired split.** If `Σ w_j == 0` → everything idle. Else `d_i = floor(w_i × B / Σ w_j)`.
 
-**Step 4 — Capped water-filling (projection onto the box).**
-- Clip `t_i = min(d_i, u_i)`.
-- Compute overflow `O = Σ(d_i − t_i)` (mass that hit ceilings) and the set `U` of markets still below their ceiling.
-- Redistribute `O` across `U` proportionally to their remaining headroom `(u_i − t_i)`, iterate until `O == 0` or no headroom remains.
-- Any residue that can't be placed (all ceilings reached) **stays idle** (≥ floor — strengthens I-3, never weakens it).
+**Step 4 — Capped water-filling.** Clip `t_i = min(d_i, u_i)`. Redistribute overflow to uncapped markets. Residue → idle.
 
-**Step 5 — Turnover cap (I-6).** Let `T = Σ|t_i − b_i|`. If `T > tMax × A / 1e4`, **scale the move toward target**: choose `λ ∈ [0,1]` maximal such that `Σ|b_i + λ(t_i − b_i) − b_i| ≤ tMax×A/1e4`, i.e. `λ = (tMax×A/1e4) / T`; set `final_i = b_i + floor(λ(t_i − b_i))`. This moves *partway* to the AI's target, never more than the turnover budget. (Bounds blast radius; the next epoch can continue converging.)
+**Step 5 — Turnover scale.** If `T = Σ|t_i − b_i| > tMax × A / 1e4`, scale: `λ = (tMax×A/1e4) / T`, `final_i = b_i + floor(λ(t_i − b_i))`.
 
-**Step 6 — Execute minimal deltas (in the vault).**
-- Phase A: for markets where `final_i < b_i`, **withdraw** `b_i − final_i` (raises idle first — guarantees liquidity for Phase B).
-- Phase B: for markets where `final_i > b_i`, **supply** `final_i − b_i` (now funded from idle).
-- Re-assert I-1..I-10 on the resulting state; revert if any fails.
-
-**Properties (state these as test assertions):**
-- *Feasibility:* the output of Steps 1–5 satisfies I-1..I-6 for any non-negative `w`.
-- *Monotone safety:* increasing any `w_i` can never push `final_i` above `u_i`.
-- *Idle dominance:* `final` always leaves `targetIdle ≥ floor`.
-- *Bounded move:* total turnover ≤ `tMax`.
-- *Determinism:* identical inputs → identical outputs (no ordering ambiguity; iterate markets in canonical index order).
+**Step 6 — Execute deltas.** Phase A: withdraw from over-weight markets (raises idle). Phase B: supply to under-weight markets (funded from idle). Re-assert I-1..I-12 on resulting state.
 
 ```
-   AI weights w_i
+   AI weights w_i (dimensionless, asset-agnostic)
         │
         ▼
- [Reserve idle floor]──► B               (I-3)
+ [Reserve idle floor] ──► B (in asset base units)       (I-3)
         │
         ▼
- [Box ceilings u_i=min(cap,maxMkt)]      (I-2,I-4)
+ [Box ceilings u_i = min(cap, maxMkt) in asset units]   (I-2, I-4)
         │
         ▼
  [Proportional split d_i]
         │
         ▼
- [Capped water-fill → t_i]  ──► residue to idle
+ [Capped water-fill → t_i] ──► residue to idle
         │
         ▼
- [Turnover scale λ → final_i]            (I-6)
+ [Turnover scale λ → final_i]                           (I-6)
         │
         ▼
- [Vault executes deltas, re-checks I-1..I-10]  ──► Rebalanced | Rejected(fail-closed)
+ [Vault executes deltas, re-checks I-1..I-12]  ──► Rebalanced | Rejected
 ```
 
 ---
@@ -552,9 +770,11 @@ This pure function converts *any* AI output into a **feasible** target or proves
 | Capability | DEFAULT_ADMIN | CURATOR | ALLOCATOR (Strategist) | SENTINEL (RiskSentinel) | Anyone |
 |---|---|---|---|---|---|
 | Grant/revoke roles | ✅ | — | — | — | — |
-| Add market (timelocked) | — | ✅ | — | — | — |
+| Submit market addition (timelocked) | — | ✅ | — | — | — |
+| Execute market addition (after timelock) | open | open | open | open | ✅ |
 | Raise supply cap (timelocked) | — | ✅ | — | — | — |
 | Lower supply cap (immediate) | — | ✅ | — | ✅ | — |
+| Register market adapter in oracle | — | ✅ (with submitAddMarket) | — | — | — |
 | Set risk params (risk-increasing → timelocked) | — | ✅ | — | — | — |
 | Set risk params (risk-reducing → immediate) | — | ✅ | — | ✅ (subset) | — |
 | `reallocate(targets)` | — | — | ✅ | — | — |
@@ -562,124 +782,162 @@ This pure function converts *any* AI output into a **feasible** target or proves
 | `unpauseDeposits` | ✅ | — | — | — | — |
 | `emergencyDeallocate` | — | — | — | ✅ | — |
 | Revoke pending timelock action | — | ✅ | — | ✅ | — |
-| Trigger AI risk check (pays STT) | open | open | open | open | ✅ |
-| Trigger AI rebalance (pays STT) | open | open | open | open | ✅ |
-| Replace Strategist / Sentinel (regrant role) | ✅ | — | — | — | — |
+| `oracle.update(market)` | open | open | open | open | ✅ |
+| Trigger AI risk check | open | open | open | open | ✅ |
+| Trigger AI rebalance | open | open | open | open | ✅ |
+| Replace Strategist / Sentinel | ✅ | — | — | — | — |
 
-**Note:** triggering is permissionless (anyone can pay STT to request a check/rebalance), but *acting* is constrained: the Strategist can only `reallocate` within invariants; the Sentinel can only reduce risk. This mirrors v1's "anyone can call `checkVault`."
+### 12.2 Replaceability
 
-### 12.2 Replaceability (generalize v1's ReplaceSentinel)
-
-- `AllocationStrategist` and `RiskSentinel` are external contracts holding roles. Admin can `revokeRole` the old and `grantRole` the new without touching the vault — enabling prompt upgrades, model-id changes, and bug fixes without migrating funds.
+Both AI arms are external contracts holding roles. Admin can `revokeRole` the old and `grantRole` the new without touching the vault or migrating funds. Oracle reads are permissionless — replacing the sentinel or strategist requires no oracle migration.
 
 ---
 
 ## 13. Storage & Interface Design (theory, not code)
 
-### 13.1 CuratedVault additions
+### 13.1 CuratedVault additions (v2.2 corrections)
 
+- `asset` — immutable `IERC20` address, set in constructor, never changes. **This is the only asset the vault ever holds, lends, or yields.** (I-12)
+- `assetDecimals` — read from `asset.decimals()` at construction, stored once.
 - `RiskParameters` struct (all bps + epoch length) with curator setters (risk-increasing timelocked).
-- `reallocate(MarketTarget[] targets, RebalanceGuard guard)` — the single invariant-checked entrypoint for the Strategist; `MarketTarget = {market, targetAssets}`, `RebalanceGuard = {epoch, totalAssetsAtRequest, snapshotHash}`.
-- `lastRebalanceEpoch` per-vault counter; `currentEpoch()` derived from `block.timestamp / rebalanceEpoch`.
-- bps-precision view metrics: `utilizationBps` (per market, already exists on market), `allocationBps(market)`, `idleBufferBps()` (replace integer-percent versions; fixes D-3).
-- Events: `Rebalanced(epoch, deltas…, turnover)`, `RebalanceRejected(invariantId)`, `RiskParamUpdated(...)`.
+- `reallocate(MarketTarget[] targets, RebalanceGuard guard)` — single invariant-checked entrypoint for the Strategist. All amounts in asset base units.
+- bps-precision view metrics: `allocationBps(market)`, `idleBufferBps()` (replace integer-percent versions; fixes D-3).
+- Events: `Rebalanced`, `RebalanceRejected(invariantId)`, `RiskParamUpdated`, `MarketQueued(id, market, eta)`, `MarketEnabled(market, supplyCap)`.
 
 ### 13.2 RiskSentinel
 
-- On-chain `assessOnChain(vault) view → (HardLevel, worstMarket, maxUtilBps, maxAllocBps, idleBps)`.
-- AI request/response plumbing (kept from v1 but generalized), `EffectiveLevel` computation (§7.4), immutable history with `PROMPT_VERSION`.
+- `assessOnChain(vault) view → (HardLevel, worstMarket, maxEffectiveUtilBps, maxAllocBps, idleBps)`.
+- Calls `oracle.update(m)` for each market inside `checkVault` before reading any utilization.
+- AI request/response plumbing, EffectiveLevel computation (§7.4), immutable history with `PROMPT_VERSION`.
 
 ### 13.3 AllocationStrategist
 
-- `AllocationMode` (Tier-1/Tier-2) curator-set.
-- `requestRebalance(vault)` payable; snapshots features + computes `snapshotHash`; binds `requestId → {vault, epoch, snapshotHash}`.
-- Tier-1 callback: decode label → policy → deterministic weights → project → `vault.reallocate`.
-- Tier-2: orchestrate N `inferNumber` calls (or one advanced batched request if the live agent supports a vector return — verify in Appendix B); collect scores; project; reallocate. Track partial responses; require all-N (or a quorum) before projecting; timeout → skip.
+- `AllocationMode` curator-set (Tier-1 / Tier-2).
+- `requestRebalance(vault)` payable — snapshots oracle-filtered features including `assetDecimals` for the prompt.
+- Callbacks decode AI output, check staleness (I-10), project, call `vault.reallocate`.
 - Audit: `Proposal` records with raw AI output, projected targets, executed deltas, outcome.
 
-### 13.4 ISomnia extensions
+### 13.4 UtilizationOracle
 
-- Keep `IAgentRequester`, callback, structs, `ConsensusType`, `ResponseStatus`.
-- Add `ILLMInferenceAgent.inferNumber(...)` and (commented, future) `inferToolsChat(...)` — **with exact signatures regenerated from the agent explorer** (Appendix B).
+- `registerAdapter(market, adapter)` — curator only; called as part of `submitAddMarket`.
+- `update(market)` — permissionless.
+- `twap(market, window) view` — returns TWAP in bps, `cautionUtilBps` if insufficient history.
+- `effectiveUtil(market) returns (uint256 util, bool spikeDetected)`.
+- `isValid(market) view` — true if age ≥ TWAP_WINDOW.
+- Events: `SuspiciousSpike(market, spot, twap, delta, timestamp)`, `AdapterRegistered(market, adapter)`.
+
+### 13.5 ISomnia extensions
+
+Keep existing interfaces. Add `ILLMInferenceAgent.inferNumber(...)` — signatures from `agents.somnia.network` (Appendix B).
 
 ---
 
 ## 14. Mock Specifications (complete, deterministic test doubles)
 
-Mocks MUST let tests reproduce every real behavior — including adversarial AI and validator disagreement — without network access.
+### 14.1 MockERC20 (replaces MockUSDC — corrected in v2.2)
 
-### 14.1 MockUSDC
+**The mock is no longer called MockUSDC.** It is `MockERC20` with a **configurable decimal count** passed to the constructor. This allows tests to verify the protocol works correctly for any asset.
 
-- Keep as-is (6-dec, open `mint`). Sufficient.
+```
+MockERC20(string name, string symbol, uint8 decimals)
+```
 
-### 14.2 MockSomniaPlatform (significantly extended)
+Standard test deployments:
+- `MockERC20("USDC", "USDC", 6)` — 6-decimal stablecoin (testnet demo)
+- `MockERC20("WETH", "WETH", 18)` — 18-decimal wrapped ETH
+- `MockERC20("WBTC", "WBTC", 8)` — 8-decimal wrapped BTC
 
-Must faithfully model the two-phase async flow and consensus, and enable adversarial tests:
+All three MUST be used in the test suite to verify asset-agnosticism (AC-19, AC-20).
 
-- **`createRequest` / `createAdvancedRequest`** — store `{callbackAddress, callbackSelector, payload, agentId, subSize, threshold, consensusType}`; assign incrementing `requestId`; require `msg.value ≥ minimumDeposit`; emit `RequestCreated`. Expose `getRequestDeposit()` / `getAdvancedRequestDeposit(size)`.
-- **`simulateInferString(requestId, word)`** — deliver a single-word LLM result (existing `simulateCallback`, renamed/clarified).
-- **`simulateInferNumber(requestId, value)`** — deliver an integer result (for Tier-2 scoring).
-- **`simulateMajority(requestId, result, n, threshold)`** — deliver `n` validator `Response`s with identical bytes and `status=Success`, `responseCount=n`, `threshold` set — exercises D-6 defense-in-depth.
-- **`simulateDisagreement(requestId, results[])`** — deliver divergent validator results; finalize as `Failed` (Majority not reached) — proves fail-safe.
-- **`simulateTimeout(requestId)`** — keep; finalize `TimedOut`.
-- **`simulateMalicious(requestId, value)`** — deliver an out-of-range / hostile score (e.g., 99999, or a label not in the enum) to prove the Strategist/vault reject or clamp it (P-3/P-7 tests).
-- **Rebate behavior** — optionally transfer a configurable rebate to the requester's `receive()` to test rebate handling.
-- Must call back via low-level `call` with the stored selector (so it works for both arms' callbacks), bubbling revert reasons (as v1 does).
+Open `mint(address to, uint256 amount)` — no role required. Amounts in the token's own decimals.
 
-### 14.3 MockLendingMarket (extended)
+### 14.2 MockSomniaPlatform (unchanged from v2.1)
 
-- Keep per-second compounding, `balanceOf`, `utilizationBps`, `setUtilization`, `fastForwardDays`, `onlyVault` supply/withdraw.
-- **Add `supplyRateBps()`** — current supply APY in bps (the yield signal for §8.5). Derive deterministically from a settable model (e.g., base rate + slope × utilization), exposing **`setSupplyRateBps(bps)`** and/or computing from `utilizationBps` so tests can craft yield landscapes.
-- **Add a settable liquidity ceiling** (`setAvailableLiquidity`) so I-7 (partial-fill / illiquid withdraw) can be tested: `withdraw` must respect available liquidity and the vault must handle a partial/blocked withdrawal gracefully.
-- **Add `maxDepositable()` / behavior at cap** so cap-edge allocation can be exercised.
+- `simulateInferString(requestId, word)` — happy path string.
+- `simulateInferNumber(requestId, value)` — integer response.
+- `simulateMajority(requestId, result, n, threshold)` — N identical responses, status=Success.
+- `simulateDisagreement(requestId, results[])` — divergent → status=Failed.
+- `simulateTimeout(requestId)` — status=TimedOut.
+- `simulateMalicious(requestId, value)` — out-of-range hostile value.
 
-### 14.4 MockMaliciousMarket (new, optional but recommended)
+### 14.3 MockLendingMarket (extended, fully asset-agnostic)
 
-- A market that reverts on `withdraw`, lies about `balanceOf`, or tries to reenter — to prove I-7, CEI, and `nonReentrant` hold. Even though only whitelisted markets are used, defense-in-depth testing is cheap and valuable.
+Accepts any ERC-20 token at construction — no USDC assumption. All supply/withdraw operations work on whatever token it is configured with.
 
-### 14.5 Test scenario fixtures (deterministic worlds)
+```
+MockLendingMarket(address asset)
+```
 
-Provide helper setups: `world_safe` (all markets healthy, room under caps), `world_caution` (one market in caution band), `world_critical` (a market over critical util), `world_yield_dispersion` (rates differ widely), `world_illiquid` (a market can't fully honor withdrawals), `world_at_caps` (markets near caps so projection residue → idle).
+- Keep: per-second compounding, `balanceOf`, `utilizationBps`, `setUtilization`, `fastForwardDays`, `onlyVault` supply/withdraw.
+- **`supplyRateBps()`** — settable yield signal.
+- **`setAvailableLiquidity(amount)`** — test I-7 (illiquid withdrawal). Amount in asset base units.
+- **`simulateFlashSpike(spikeBps, durationBlocks)`** — temporarily overrides `utilizationBps()` for N blocks.
+- **`simulateGradualRise(targetBps, durationSeconds)`** — steady utilization climb for testing real emergencies.
+
+### 14.4 MockUtilizationOracle
+
+- `setEffectiveUtil(market, util, spikeDetected)` — directly control returned value.
+- `setTwap(market, twap)` — control TWAP independently.
+- `simulateSpike(market, spotBps, twapBps)` — emits SuspiciousSpike.
+- `setInvalid(market)` — makes `isValid()` return false.
+
+### 14.5 MockMaliciousMarket (asset-agnostic)
+
+A market that reverts on `withdraw`, lies about `balanceOf`, or attempts reentrancy. Configured with the vault asset. Proves I-7, CEI, and `nonReentrant` hold for any asset.
+
+### 14.6 Test scenario fixtures
+
+World fixtures: `world_safe`, `world_caution`, `world_critical`, `world_flash_spike`, `world_real_emergency`, `world_gradual_rise`, `world_yield_dispersion`, `world_illiquid`, `world_at_caps`.
+
+**New v2.2 fixtures:**
+- `world_18dec_asset` — vault configured with WETH (18 decimals), tests that all arithmetic and prompt generation is correct.
+- `world_8dec_asset` — vault configured with WBTC (8 decimals), tests boundary decimal cases.
 
 ---
 
-## 15. Threat Model & Security Analysis (auditor lens)
+## 15. Threat Model & Security Analysis
 
 ### 15.1 Trust boundaries
 
 ```
- Untrusted ───────────────────────────────────────────────► Trusted
- ┌───────────────┐   ┌──────────────────┐   ┌────────────────────────────┐
- │ AI model output│   │ Strategist proj. │   │ CuratedVault custody + I-*  │
- │ (could be wrong│──►│ (deterministic,  │──►│ (authoritative; rejects any │
- │  or malicious) │   │  no money power) │   │  invariant violation)       │
- └───────────────┘   └──────────────────┘   └────────────────────────────┘
-        ▲                                              ▲
-        │ Somnia platform (semi-trusted: consensus)    │ Curator/Admin (governance-trusted, timelocked)
-        └──────────────────────────────────────────────┘
+ Untrusted ─────────────────────────────────────────────────────────────► Trusted
+ ┌──────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌───────────────────────┐
+ │ AI model     │  │ Strategist proj. │  │ UtilizationOracle│  │ CuratedVault           │
+ │ output       │  │ (deterministic,  │  │ (TWAP filter,    │  │ custody + I-1..I-12    │
+ │ (untrusted)  │─►│ asset-agnostic)  │─►│ asset-agnostic)  │─►│ (authoritative;        │
+ │              │  │                  │  │                  │  │ any configured asset)  │
+ └──────────────┘  └──────────────────┘  └──────────────────┘  └───────────────────────┘
 ```
 
 ### 15.2 Threats & mitigations
 
 | ID | Threat | Mitigation |
 |---|---|---|
-| **T-1** | Malicious/compromised AI proposes a draining or over-concentrated allocation | I-2/I-4/I-5/I-6 in the vault: worst case is a bounded reshuffle among whitelisted, capped markets, ≤ turnover, once/epoch (P-7). The AI literally cannot exceed the box; the projection clips and the vault re-checks. |
-| **T-2** | Forged callback (anyone calls `handleResponse`) | `onlyPlatform` + `pendingRequests`/`activeRequest` gating; unknown `requestId` rejected. |
-| **T-3** | Sandwich / large deposit-redeem between request and callback (stale AI view) | I-10 staleness + epoch binding; reject and re-request if drift exceeds tolerance. |
-| **T-4** | Validator disagreement / non-deterministic prompt → no consensus | Constrained outputs (P-3) + canonical lossless inputs (P-4) + `chainOfThought=false`; on `Failed`/`TimedOut` → fail-safe skip / caution (P-5). Tested via `simulateDisagreement`. |
-| **T-5** | Idle-buffer starvation → failed user withdrawals | I-3 enforced on every rebalance; `_ensureLiquidity` retained at redeem; rounding favors idle. |
-| **T-6** | Reentrancy via a market during withdraw/supply | CEI + `nonReentrant` on `reallocate`/`allocate`/`deallocate`/`deposit`/`redeem`; `MockMaliciousMarket` test. |
-| **T-7** | DoS via spamming triggers | Per-vault cooldown (risk) + per-epoch (allocation) + payment requirement; one in-flight per arm. |
-| **T-8** | AI never responds (platform down) | Allocation is opportunistic — no rebalance, funds stay safe. Risk circuit-breaker has on-chain hard guards independent of AI (§7.2). |
-| **T-9** | Cap/rounding gaming with dust | bps math + round-in-vault's-favor policy (§10) + epsilon-bounded conservation (I-1). |
-| **T-10** | Sentinel/Strategist over-reach if compromised | Least-privilege roles: Sentinel risk-reducing only; Strategist bounded by I-*; both replaceable; neither can raise caps or add markets (those are curator + timelock). |
-| **T-11** | Curator turns malicious | Out of scope for AI safety, but timelock on risk-increasing actions + immediate sentinel/curator revoke gives depositors a reaction window (carried from v1; document clearly). |
-| **T-12** | Prompt-injection via on-chain data the model reads | The model only reads our **own canonical numeric features**, never attacker-controlled free text/URLs in the core path (the optional JSON-API yield feature is the only external read and is treated as a non-authoritative feature). No external strings enter the prompt in v2 core. |
+| **T-1** | Malicious AI proposes draining allocation | I-2/I-4/I-5/I-6 in vault. Bounded reshuffle among whitelisted, capped markets, ≤ turnover, once/epoch. |
+| **T-2** | Forged callback | `onlyPlatform` + `pendingRequests`/`activeRequest` gating. |
+| **T-3** | Sandwich / large deposit between request and callback | I-10 staleness + epoch binding. |
+| **T-4** | Validator disagreement / non-deterministic prompt | Constrained outputs + canonical inputs + `chainOfThought=false`. `Failed`/`TimedOut` → fail-safe. |
+| **T-5** | Idle-buffer starvation | I-3 on every rebalance; `_ensureLiquidity` at redeem; rounding favors idle. |
+| **T-6** | Reentrancy via market | CEI + `nonReentrant` on all state-changing entrypoints. |
+| **T-7** | DoS via spamming triggers | Per-vault cooldown + per-epoch + payment required. |
+| **T-8** | AI platform down | On-chain hard guards independent of AI. Allocation stays at last safe state. |
+| **T-9** | Dust / rounding attack | bps math + round-in-depositor's-favor + epsilon-bounded conservation (I-1). |
+| **T-10** | Sentinel/Strategist compromise | Least-privilege roles; Sentinel risk-reducing only; Strategist bounded by I-*; both replaceable. |
+| **T-11** | Curator malicious | Timelock on risk-increasing actions + immediate sentinel revoke gives depositors a reaction window. |
+| **T-12** | Prompt injection | Only canonical numeric features in prompt. No attacker-controlled strings. |
+| **T-13** | Flash-loan spot manipulation | TWAP oracle: 2-second spike moves 30-min TWAP by ≤ 2 bps. False emergency cannot be triggered. |
+| **T-14** | Two-block flash-loan attack | TWAP contains history across many blocks. Two manipulated blocks contribute ≤ 0.2% of total weight. |
+| **T-15** | Oracle griefing via update() | Same-block updates are no-ops (elapsed=0). Cross-block manipulation requires sustained real capital. |
+| **T-16** | New market bypasses TWAP | `isValid()` false until TWAP_WINDOW of history. Conservative `cautionUtilBps` returned until then. |
+| **T-17** | Wrong-asset market added | I-12: any market that does not return `vault.asset()` on withdraw reverts during supply/withdraw. The curator is responsible for only adding markets that lend the vault's configured asset. Tests MUST verify a wrong-asset market causes a revert, not a silent loss. |
 
-### 15.3 Privileged-action checklist (must be in tests)
+### 15.3 Privileged-action checklist
 
-- Every AI-driven action has a corresponding "AI is hostile" test proving funds remain within all invariants.
-- Every emergency action has a "AI is silent" test proving on-chain guards still protect.
+- Every AI-driven action has a "AI is hostile" test.
+- Every emergency action has a "AI is silent" test.
+- Every market has a "flash-spike" test.
+- Every market has a "gradual real rise" test.
+- Tests run for 6-decimal, 8-decimal, and 18-decimal assets.
 
 ---
 
@@ -688,7 +946,7 @@ Provide helper setups: `world_safe` (all markets healthy, room under caps), `wor
 | Event | RiskSentinel behavior | AllocationStrategist behavior |
 |---|---|---|
 | AI `Success`, recognized output | Apply EffectiveLevel (§7.4) | Project + reallocate (within I-*) |
-| AI `Success`, unrecognized output | Treat as no-deescalation (≥ Hard) | Abort rebalance (treat as DEFENSIVE/skip) |
+| AI `Success`, unrecognized output | Treat as no-escalation (≥ Hard) | Abort rebalance (DEFENSIVE/skip) |
 | AI `Failed` | EffectiveLevel = Hard; record `AI_UNAVAILABLE` | `RebalanceSkipped(FAILED)`, no move |
 | AI `TimedOut` | EffectiveLevel = Hard; record `AI_UNAVAILABLE` | `RebalanceSkipped(TIMEOUT)`, no move |
 | Empty responses | As `Failed` | As `Failed` |
@@ -696,18 +954,22 @@ Provide helper setups: `world_safe` (all markets healthy, room under caps), `wor
 | Staleness drift exceeded | n/a | `RebalanceRejected(STALE)`, re-request next epoch |
 | Market illiquid on withdraw | Partial emergency-deallocate, emit shortfall | Partial-fill per I-7 or reject |
 | Vault paused | Emergency actions still allowed | Allocation-in forbidden (I-9); deallocation allowed |
+| Flash-loan spike detected | `SuspiciousSpike` emitted; effectiveUtil = TWAP; hard guard uses TWAP | Feature block shows spike=1; AI penalizes the market; TWAP-based score used |
+| Oracle invalid (new market) | Market treated as cautionUtilBps | Market scored conservatively |
+| Wrong-asset market behavior | withdraw reverts; emergency-deallocate catches it | reallocate target for that market rejected (I-12) |
 
-Principle restated: **the system's worst-case behavior under any AI failure is "do nothing / stay safe," never "do something unsafe."**
+**Restated principle:** worst-case behavior under any failure is "do nothing or act conservatively" — for any configured asset.
 
 ---
 
 ## 17. Economics, Gas & Cost Analysis
 
-- **Per AI call:** `getRequestDeposit() + 0.07 × subSize` STT. Tier-1 = 1 call/rebalance. Tier-2 = N calls/rebalance (N = enabled markets). Risk check = 1 call.
-- **Deposit handling:** always compute at call time; implement `receive()` for rebates (D-4 fix). Document expected per-action cost in README and reconcile the 0.15 vs 0.25 discrepancy to a single computed value.
-- **Somnia gas multiplier:** keep the `--gas-estimate-multiplier 3000` deployment guidance (~27× EVM estimates) from v1.
-- **Epoch sizing trade-off:** shorter `rebalanceEpoch` = more responsive but more STT spend and more churn; longer = cheaper, calmer. Make it curator-tunable; default conservative.
-- **Tier choice trade-off:** Tier-1 (cheap, coarse) vs Tier-2 (N× cost, fine-grained). Document so curators choose deliberately.
+- **Per AI call:** `getRequestDeposit() + 0.07 × subSize` STT. Tier-1 = 1 call/rebalance. Tier-2 = N calls/rebalance. Risk check = 1 call.
+- **Oracle update cost:** one SSTORE per update. Cheap; no STT required.
+- **Deposit handling:** compute at call time from on-chain getter; implement `receive()` for rebates.
+- **Somnia gas multiplier:** keep `--gas-estimate-multiplier 3000` from v1.
+- **TWAP_WINDOW trade-off:** longer = more manipulation-resistant, slower real-emergency response. 30 min recommended. For testnet demo: 5 min is acceptable.
+- **Asset-agnostic cost note:** the vault's gas costs are independent of the asset's decimal count. All ratio math is bps; all amount math is integer arithmetic in native units.
 
 ---
 
@@ -715,45 +977,61 @@ Principle restated: **the system's worst-case behavior under any AI failure is "
 
 ### 18.1 Test layers
 
-1. **Unit (pure math):** projection (§11) feasibility/monotonicity/idle-dominance/turnover/determinism; bps metric calculations; prompt feature-encoding golden strings (§9.3); enum hash matching.
-2. **Component:** RiskSentinel `assessOnChain` truth table; EffectiveLevel precedence table (§7.4); Strategist tier flows with mocked callbacks.
-3. **Integration (end-to-end via mocks):** full request→consensus→callback→reallocate for Tier-1 and Tier-2; risk check→critical→pause+deallocate.
-4. **Adversarial:** hostile AI outputs; validator disagreement; timeout; malicious market; staleness; cap edges; illiquidity.
-5. **Property/fuzz (Foundry, 256 runs):** for random non-negative weights and random feasible chain states, the post-rebalance state satisfies **all** I-* (this is the headline safety proof).
-6. **Invariant tests (Foundry invariant mode):** across random sequences of deposit/redeem/rebalance/risk-check, `totalAssets` conservation, idle floor, cap compliance, and no-unauthorized-cap-increase always hold.
+1. **Unit:** projection math; bps metrics; feature encoding golden strings; enum hash matching; TWAP accumulator arithmetic; dual-track logic truth table; decimal-agnostic amount math.
+2. **Component:** RiskSentinel assessOnChain truth table; EffectiveLevel precedence; Strategist tier flows with mocked callbacks; oracle effectiveUtil outputs.
+3. **Integration:** full request→consensus→callback→reallocate; risk check→critical→pause+deallocate; flash-spike→oracle filters→no false emergency.
+4. **Adversarial:** hostile AI outputs; validator disagreement; timeout; malicious market; staleness; cap edges; illiquidity; flash spikes; two-block attacks; wrong-asset market.
+5. **Property/fuzz (256 runs):** post-rebalance state satisfies all I-1..I-12 for random weights and states.
+6. **Invariant mode:** across random sequences of actions, conservation, idle floor, cap compliance, and no-false-emergency always hold.
+7. **Multi-asset (new v2.2):** run core integration tests for 6-decimal, 8-decimal, and 18-decimal assets.
 
-### 18.2 Acceptance criteria (sample — implementer expands to cover every R/I)
+### 18.2 Acceptance criteria
 
-- **AC-1** Deposit/redeem/share-price match v1 semantics (regression).
-- **AC-2** `assessOnChain` returns the **true** worst market (argmax util) — D-1 regression test.
-- **AC-3** No hardcoded agent deposit anywhere; all use `getRequestDeposit()+reward` — D-4 regression.
-- **AC-4** All ratio metrics are bps; no integer-percent path remains — D-3 regression.
-- **AC-5** Given a malicious Tier-2 score vector `[10000, 0]` on a market whose cap is 30% of assets, post-rebalance that market's balance ≤ `min(cap, maxMarketBps)` — I-2/I-4.
-- **AC-6** Given any AI weights, `targetIdle ≥ minIdleBufferBps` — I-3 (fuzzed).
-- **AC-7** Turnover of any single rebalance ≤ `maxTurnoverBps` — I-6 (fuzzed).
-- **AC-8** AI `TimedOut`/`Failed`/unknown-word → no fund movement (allocation) / no de-escalation (risk) — P-5.
-- **AC-9** Forged `handleResponse` from a non-platform caller reverts — T-2.
-- **AC-10** Staleness beyond `driftToleranceBps` rejects the rebalance — I-10.
+- **AC-1** Deposit/redeem/share-price match v1 semantics for the configured asset (regression).
+- **AC-2** `assessOnChain` returns true worst market (argmax effectiveUtil) — D-1 regression.
+- **AC-3** No hardcoded agent deposit — D-4 regression.
+- **AC-4** All ratio metrics are bps; no integer-percent path — D-3 regression.
+- **AC-5** Malicious Tier-2 score on capped market: balance ≤ min(cap, maxMarketBps) — I-2/I-4.
+- **AC-6** Any AI weights: targetIdle ≥ minIdleBufferBps — I-3 (fuzzed).
+- **AC-7** Any rebalance turnover ≤ maxTurnoverBps — I-6 (fuzzed).
+- **AC-8** AI TimedOut/Failed/unknown → no fund movement; no de-escalation — P-5.
+- **AC-9** Forged handleResponse from non-platform caller reverts — T-2.
+- **AC-10** Staleness beyond driftToleranceBps rejects rebalance — I-10.
 - **AC-11** Reentrant market cannot break accounting — T-6.
 - **AC-12** EffectiveLevel never below HardLevel for any AI input — §7.4.
+- **AC-13** Flash-loan spike of 2000 bps for 2 seconds moves TWAP by ≤ 10 bps — I-11/T-13.
+- **AC-14** Two-block flash-loan attack: effectiveUtil returns TWAP; no false emergency fires — T-14.
+- **AC-15** Real gradual rise: TWAP and spot both exceed threshold → secondary rule → critical fires — T-13.
+- **AC-16** New market with oracle not yet valid: returns cautionUtilBps; no allocation until isValid() — T-16.
+- **AC-17** `oracle.update(market)` callable by any address with no role check.
+- **AC-18** `SuspiciousSpike` event emitted with correct fields when dual-track engages.
+- **AC-19** *(New v2.2)* Vault configured with 18-decimal WETH: deposit, rebalance, and risk check all produce correct results. Feature block `decimals=18` field is present and correct.
+- **AC-20** *(New v2.2)* Vault configured with 8-decimal WBTC: same as AC-19 with `decimals=8`.
+- **AC-21** *(New v2.2)* Wrong-asset market (configured to return a different token): `supply` or `withdraw` reverts; I-12 is enforced; no silent loss of vault asset.
+- **AC-22** *(New v2.2)* No reference to "USDC" appears anywhere in contract code or mock names — confirmed by grep test.
 
 ### 18.3 Tooling
 
-- Foundry: `forge test -vvv`, `forge test --match-contract`, fuzz 256, invariant mode, `forge snapshot` for gas, `forge fmt`. Keep Solidity 0.8.20 / EVM paris / optimizer 200 from v1.
+Foundry: `forge test -vvv`, fuzz 256 runs, invariant mode, `forge snapshot`, `forge fmt`. Solidity 0.8.20 / EVM paris / optimizer 200 from v1.
 
 ---
 
 ## 19. Deployment & Migration Plan
 
-1. **Deploy core:** `MockUSDC`, two `MockLendingMarket`s (with `supplyRateBps`), `CuratedVault` (with risk params).
-2. **Deploy arms:** `RiskSentinel`, `AllocationStrategist` (mode = Tier-1).
-3. **Wire roles:** grant `SENTINEL_ROLE` → RiskSentinel; `ALLOCATOR_ROLE` → Strategist; keep curator/admin.
-4. **Timelock market adds** (submit → wait → execute), seed caps and risk params.
-5. **Trigger flows:** `cast send` for risk check and rebalance (forge-script simulation fails on Somnia `NotActivated` — keep v1's `cast send` guidance), value computed from on-chain deposit helper.
-6. **Replace-arm scripts:** generalize `ReplaceSentinel.s.sol` to also replace the Strategist.
-7. **Verify-response scripts:** read back latest risk verdict and latest rebalance proposal.
+1. **Configure asset.** Decide which ERC-20 asset this vault deployment serves. This decision is permanent.
+2. **Deploy oracle infrastructure.** AaveAdapter / CompoundAdapter / GenericAdapter as needed for each planned market.
+3. **Deploy core.** `MockERC20` (for testnet with configured decimals), `CuratedVault(assetAddress, ...)`.
+4. **Deploy arms.** `RiskSentinel(oracleAddress, ...)`, `AllocationStrategist(oracleAddress, ..., Tier-1)`.
+5. **Wire roles.** Grant `SENTINEL_ROLE` → RiskSentinel; `ALLOCATOR_ROLE` → Strategist.
+6. **Submit market additions.** Curator calls `submitAddMarket(market, supplyCap, adapterAddress)` for each market. This simultaneously registers the adapter in the oracle.
+7. **Wait for timelocks.** Minimum timelock period per market addition.
+8. **Execute market additions.** `executeAddMarket(market, supplyCap, adapterAddress)` for each market.
+9. **Seed oracle.** Call `oracle.update(market)` at least every 5 minutes for TWAP_WINDOW (30 min). `oracle.isValid(market)` must return true for all markets before AI arms are activated.
+10. **Trigger flows.** `cast send` for risk check and rebalance (forge-script simulation fails on Somnia `NotActivated`). Value computed from `getRequestDeposit()`.
+11. **Replace-arm scripts.** `ReplaceSentinel.s.sol` and `ReplaceStrategist.s.sol` — revoke old role, grant to new contract. Oracle requires no migration.
+12. **Verify-response scripts.** Read back latest risk verdict, latest rebalance proposal, and latest oracle TWAP values.
 
-Reconcile all docs (README, CLAUDE.md) to: bps metrics, computed deposits, the two-arm architecture, and the corrected cost figure.
+Reconcile all docs (README, CLAUDE.md) to: asset-agnostic language, bps metrics, computed deposits, two-arm architecture, oracle infrastructure, correct cost figures.
 
 ---
 
@@ -761,26 +1039,31 @@ Reconcile all docs (README, CLAUDE.md) to: bps metrics, computed deposits, the t
 
 | Phase | Deliverable | Risk |
 |---|---|---|
-| **0** | Audit-fix pass: D-1..D-7 on the existing system; bps migration | Low |
-| **1** | RiskSentinel redesign (on-chain hard guards + narrowed AI second-opinion + precedence rule) | Low |
-| **2** | Invariant system in `CuratedVault.reallocate` + projection math (§11) — *no AI yet*, exercised by a stub allocator | Medium |
-| **3** | AllocationStrategist **Tier-1** (strategy-label) end-to-end | Medium |
-| **4** | AllocationStrategist **Tier-2** (per-market scoring) | Medium |
-| **5 (future, NG-3)** | **Tier-3** `inferToolsChat` allocator — model yields candidate moves, vault re-validates every move against I-*; only after consensus behavior on structured output is proven and an audit is done | High |
-| **6 (future)** | Reactive/scheduled triggers if a native Somnia scheduler is confirmed; otherwise keeper/cron off-chain. Treat as optional; the permissionless `requestRebalance` keeper model is the live anchor. | Low |
+| **0** | Audit-fix pass: D-1..D-9; bps migration; asset-agnostic refactor; deploy UtilizationOracle with adapters; rename MockUSDC → MockERC20 | Low |
+| **1** | RiskSentinel redesign (on-chain hard guards via effectiveUtil + narrowed AI second-opinion + precedence rule) | Low |
+| **2** | Invariant system I-1..I-12 in CuratedVault.reallocate + projection math — no AI yet, stub allocator | Medium |
+| **3** | AllocationStrategist Tier-1 end-to-end | Medium |
+| **4** | AllocationStrategist Tier-2 end-to-end | Medium |
+| **5 (future)** | Tier-3 inferToolsChat — only after audit; vault re-validates every move | High |
+| **6 (future)** | Reactive/scheduled triggers if native Somnia scheduler confirmed. Permissionless keeper model is the live anchor. | Low |
 
-**Order rationale:** build the constitution (Phase 2) *before* the brain (Phases 3–4), so the brain is born into a cage. Never ship an AI arm before its invariants exist and are fuzz-proven.
+**Order rationale:** asset-agnostic refactor (Phase 0) → oracle + cage (Phases 0-2) → brain (Phases 3-4). The AI arm is born into a pre-existing, fuzz-proven, asset-agnostic safety system.
 
 ---
 
 ## 21. Open Decisions for the Implementer
 
-- **OD-1 Tier-2 batching:** verify on `agents.somnia.network` whether the LLM agent can return a numeric **vector** in one call (cheaper, but check consensus behavior) vs N single `inferNumber` calls. Default to N calls if a consensus-safe vector return isn't confirmed.
-- **OD-2 Idle floor vs supplyQueue:** decide whether idle is a pure floor (simpler) or a managed reserve with a target band. Spec assumes a floor.
-- **OD-3 Risk param change asymmetry:** confirm exactly which risk-param changes are risk-increasing (timelocked) vs risk-reducing (immediate). Spec proposes: lowering caps / raising idle floor / lowering maxMarket / lowering turnover = immediate; the inverses = timelocked.
-- **OD-4 Worst-market emergency fraction:** keep 50% default `pullBps`, or make it scale with how far over the critical threshold the market is. Spec keeps a curator-set constant for v2.
-- **OD-5 Multi-vault:** the arms are written per-vault-registry; confirm whether v2 targets one vault (simpler) or many.
-- **OD-6 Prompt versioning:** confirm `PROMPT_VERSION` is recorded in every audit record and bumped on any system-prompt/grammar change.
+- **OD-1** Tier-2 batching: verify on `agents.somnia.network` whether vector return in one call is consensus-safe vs N separate inferNumber calls. Default to N calls.
+- **OD-2** Idle floor vs supply queue: pure floor (simpler) or managed reserve band. Spec assumes pure floor.
+- **OD-3** Risk param change asymmetry: confirm which changes are risk-increasing (timelocked) vs risk-reducing (immediate) per the list in §12.1.
+- **OD-4** Worst-market emergency fraction: 50% default pullBps, or scale with over-threshold distance. Spec keeps curator-set constant for v2.
+- **OD-5** Multi-vault: confirm whether v2 targets one vault (simpler) or many.
+- **OD-6** Prompt versioning: confirm PROMPT_VERSION recorded in every audit record, bumped on any change.
+- **OD-7** TWAP_WINDOW for testnet: 30 min for mainnet, 5 min for testnet demo. Make deploy-time parameter.
+- **OD-8** Oracle update keeper: recommend off-chain keeper calling `update` every 5 min between sentinel triggers. Document in CLAUDE.md.
+- **OD-9** Secondary rule thresholds: reuse curator-set `criticalUtilBps` and `cautionUtilBps` from risk params. No separate parameters.
+- **OD-10** *(New v2.2)* Decimal normalization in feature block: the `ta` (totalAssets) field is in native asset base units. The `decimals` field tells the AI the scale. Decision: do NOT normalize all amounts to a fixed decimal count inside the contract — this would require multiplication/division and introduces rounding. The AI receives native amounts plus the decimal count and handles interpretation. This is simpler and lossless.
+- **OD-11** *(New v2.2)* Multi-vault deployment: for protocols wanting vaults for multiple assets (USDC vault + WETH vault + WBTC vault), each is a completely independent deployment of the full protocol stack. They share no storage. The oracle can optionally be shared if the same markets are used — the oracle is market-specific, not asset-specific.
 
 ---
 
@@ -791,48 +1074,78 @@ Reconcile all docs (README, CLAUDE.md) to: bps metrics, computed deposits, the t
 | R-1 Move risk arithmetic on-chain | §7.2, P-1 |
 | R-2 Redesign prompt strategy | §9 (L-1..L-5, grammar, system prompts) |
 | R-3 Autonomous allocation w/ EVM guardrails | §8, §10, §11 |
-| R-4 No AI output can break invariants | §10 (enforced in vault), §11 (projection), §15 |
+| R-4 No AI output can break invariants | §10, §11, §15 |
 | R-5 Fail-safe under AI failure | §7.4, §8.4, §16, P-5 |
 | R-6 Live-deployable on Somnia | §4, §8.3 Tier-1/2, §19 |
 | R-7 Complete mocks incl. adversarial | §14 |
-| R-8 Fix D-1..D-7 | §2.4, §18.2 AC-2/3/4 |
+| R-8 Fix D-1..D-7 | §2.4, §18.2 AC-2..AC-4 |
 | R-9 Diagrams & theory, no code | This document |
+| R-10 Flash-loan manipulation resistance | §2.4 D-8, §5.1, §7.7, I-11, T-13..T-16, AC-13..AC-18 |
+| R-11 Asset-agnosticism | §2.4 D-9, §5.4, §6.1, §6.2, I-12, T-17, AC-19..AC-22, G-9, P-10 |
 
 ---
 
 ## Appendix A — Glossary
 
-- **bps** — basis points; 1% = 100 bps; 100% = 10,000 bps.
+- **bps** — basis points; 1% = 100 bps; 100% = 10,000 bps. Dimensionless — independent of vault asset.
+- **vault asset** — the ERC-20 token configured at vault deployment. Immutable. All lending markets in the vault accept and return this token. Examples: USDC (6 dec), WETH (18 dec), WBTC (8 dec).
+- **assetDecimals** — `asset.decimals()`, stored at vault construction. Used for all amount arithmetic. Never assumed to be 6.
 - **Subcommittee** — the set of validators elected to execute an agent request.
-- **Majority consensus** — finalization requires ≥ threshold validators returning byte-identical result bytes; only reachable for LLM agents because of fixed seed + temp=0.
-- **Operations reserve / reward pot** — the two parts of the agent deposit: gas-refund floor (`getRequestDeposit()`) and per-agent reward (`price × size`).
-- **Idle floor** — minimum fraction of assets kept un-allocated for withdrawal liquidity.
-- **Turnover** — total absolute asset movement in a single rebalance.
-- **Projection** — deterministic mapping of AI weights onto the feasible (cap/idle/concentration/turnover-respecting) set.
-- **Epoch** — the minimum interval between executed rebalances.
+- **Majority consensus** — finalization requires ≥ threshold validators returning byte-identical result bytes.
+- **Idle floor** — minimum fraction of vault assets (in vault asset base units) kept unallocated for withdrawal liquidity.
+- **Turnover** — total absolute asset movement in one rebalance, in vault asset base units.
+- **Projection** — deterministic mapping of AI weights onto the feasible set. Asset-agnostic.
+- **Epoch** — minimum interval between executed rebalances.
+- **TWAP** — Time-Weighted Average Utilization. Maintained by UtilizationOracle. Resistant to flash-loan manipulation. A 2-second spike in a 30-minute window moves the TWAP by ≤ 2 bps.
+- **effectiveUtil** — manipulation-resistant utilization from `UtilizationOracle.effectiveUtil(market)`. Either TWAP (spike detected) or spot (readings agree or real emergency).
+- **spikeToleranceBps** — max acceptable delta between spot and TWAP before spike classification. Default 1000 bps (10%).
+- **SuspiciousSpike** — event emitted when `spot - twap > spikeToleranceBps`.
+- **IMarketAdapter** — protocol-specific adapter translating any external market's data to standard `utilizationBps(market)`. Asset-agnostic.
+- **Secondary rule** — dual-track override using spot when `spot > criticalUtilBps AND twap > cautionUtilBps`. Catches real sustained emergencies.
+- **isValid** — oracle state: true when observation age ≥ TWAP_WINDOW. False → conservative `cautionUtilBps` returned.
+- **Market lifecycle** — the four stages a new market passes through: submitted (timelocked) → executed (enabled) → seeding (oracle accumulates TWAP history) → active (isValid=true, fully operational).
+- **I-12** — Asset conservation invariant: only `vault.asset()` ever enters or leaves the vault's balance.
 
-## Appendix B — Interface Verification Checklist (MUST do before coding)
+---
 
-1. Visit `https://agents.somnia.network` (testnet: `agents.testnet.somnia.network`), open the **LLM Inference** agent, and copy the **exact** Solidity signatures for `inferString`, `inferNumber`, `inferChat`, `inferToolsChat`. Treat §4.2 as semantics only.
-2. Copy the real **LLM Inference `agentId`** (same on testnet/mainnet per docs) into config; never hardcode a placeholder.
-3. Confirm `getRequestDeposit()` and `getAdvancedRequestDeposit(size)` return values on the target network; size deposits from them at runtime.
-4. Confirm callback signature `handleResponse(uint256, Response[], ResponseStatus, Request)` and that the selector passed to `createRequest` matches your function exactly.
-5. Confirm platform address for the target chain (testnet `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`, mainnet `0x5E5205CF39E766118C01636bED000A54D93163E6`).
-6. Re-confirm per-agent LLM price (0.07) and default subcommittee (3) on the **Gas Fees** doc; update constants if changed.
+## Appendix B — Interface Verification Checklist
+
+1. Visit `https://agents.somnia.network`, open LLM Inference agent, copy exact Solidity signatures for `inferString`, `inferNumber`, `inferChat`, `inferToolsChat`. Treat §4.2 as semantics only.
+2. Copy real LLM Inference `agentId` — never hardcode a placeholder.
+3. Confirm `getRequestDeposit()` and `getAdvancedRequestDeposit(size)` return values on target network.
+4. Confirm callback signature and selector.
+5. Confirm platform address for target chain.
+6. Confirm per-agent LLM price and default subcommittee size.
+
+---
 
 ## Appendix C — Prompt Templates (semantic; pin exact text in code, version it)
 
 **Risk regime — system (allowedValues = STABLE | WATCH | DETERIORATING):**
-> "You are a portfolio-risk regime classifier for a lending vault. Inputs are canonical integer features in basis points, markets in fixed order. The smart contract already enforces every hard numeric limit; judge only the overall trajectory and concentration of risk that no single limit captures. Reply with exactly one of: STABLE, WATCH, DETERIORATING. No other text."
+> "You are a portfolio-risk regime classifier for a yield vault holding a single configured asset. Inputs are canonical integer features: ratios in basis points (dimensionless, asset-agnostic), amounts in the vault asset's native units with decimal count given in the PORTFOLIO header. The smart contract enforces all hard numeric limits. Your job: judge the overall trajectory and concentration of risk no single limit captures. A spike=1 means a flash-loan manipulation was detected — treat this as an additional risk signal. Output exactly one of: STABLE, WATCH, DETERIORATING. No other text."
 
 **Allocation policy — system (allowedValues = DEFENSIVE | BALANCED | YIELD_TILT | DERISK):**
-> "You are a capital-allocation policy selector for a lending vault. Choose the single policy that best fits current conditions; the contract converts your choice into a concrete, cap-respecting allocation. Prefer DERISK or DEFENSIVE when any market nears its caution utilization or the idle buffer is thin; prefer YIELD_TILT only when all markets are comfortably healthy and supply-rate dispersion is meaningful; otherwise BALANCED. Reply with exactly one policy word. No other text."
+> "You are a capital-allocation policy selector for a yield vault. The contract converts your choice into a concrete, cap-respecting allocation in the vault's native asset. The util field is manipulation-resistant (time-weighted). Prefer DERISK or DEFENSIVE when any market nears caution utilization, has spike=1, or the idle buffer is thin. Prefer YIELD_TILT only when all markets are healthy and rate differences are meaningful. Output exactly one policy word. No other text."
 
 **Allocation score — system (inferNumber, clamp [0,10000]):**
-> "Given one market's features within the portfolio context, output a single integer in [0,10000] for how much capital it deserves: reward higher supply rate, penalize higher utilization and thin cap headroom. Output only the integer."
+> "Given one market's features in the portfolio context, output a single integer attractiveness score in [0,10000]. Reward higher supply rate, penalize higher effective utilization and thin cap headroom. If spike=1, penalize more severely. Output only the integer."
 
-**Feature block (user prompt) — pinned grammar (§9.3).** Rendered deterministically; covered by golden-string unit tests; `PROMPT_VERSION` bumped on any change.
+**Feature block (user prompt) — pinned grammar (§9.3).** Covered by golden-string unit tests. `PROMPT_VERSION` bumped on any grammar or system-prompt change.
 
 ---
 
-*End of SDD v2.0. The implementing agent should now produce an implementation plan mapping every R-*, I-*, AC-*, and D-* to files, functions, and tests, then build Phase 0 → Phase 4, with Phase 2 (the constitution) preceding any AI allocation arm.*
+## Appendix D — Flash-Loan Attack Analysis
+
+**Why spot reads are manipulable:** Any value read from an external contract inside the same transaction as a privileged action is manipulable if the attacker controls that external state atomically via flash loans.
+
+**Why two-block defense fails:** Attacker executes two separate flash-loan transactions — one in block N (initiateCheck) and one in block N+1 (checkVault). Both readings are consistent with each other but inconsistent with reality. Two-block consistency checks are insufficient.
+
+**Why TWAP defeats both attacks:** The accumulator `Σ(util_i × elapsed_i)` contains history across all prior blocks. A single malicious block contributes `blockTime / windowLength ≈ 0.1%`. Two malicious blocks contribute ≈ 0.2%. Moving the TWAP by 1000 bps requires holding the manipulated state for 3 real minutes — requiring capital, not a flash loan.
+
+**Why real emergencies are still caught:** A genuine market-run scenario where utilization rises organically over 30 minutes moves both spot and TWAP upward together. When spot > criticalUtilBps AND twap > cautionUtilBps, the secondary rule fires and `effectiveUtil = spot`. The sentinel catches the real emergency approximately 10–15 minutes into the crisis.
+
+**Asset-agnostic note:** the TWAP mechanism is in utilization bps — dimensionless. It works identically regardless of whether the vault holds USDC, WETH, or any other asset.
+
+---
+
+*End of SDD v2.2. The implementing agent should map every R-*, I-*, AC-*, and D-* (including new D-9, I-12, AC-19..AC-22, R-11) to files, functions, and tests. Build in order: Phase 0 (asset-agnostic refactor + oracle + bug fixes) → Phase 1 (sentinel) → Phase 2 (constitution) → Phase 3 (Tier-1 brain) → Phase 4 (Tier-2 brain). The oracle MUST be seeded and valid, and the vault MUST be asset-agnostic, before the AI arms are activated on any network.*
