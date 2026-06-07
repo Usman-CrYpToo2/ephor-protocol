@@ -13,6 +13,9 @@ via_ir               = false
  
 [profile.default.fuzz]
 runs = 256
+
+[profile.default.lint]
+severity = ["high", "med"]
  
 [rpc_endpoints]
 somnia_testnet = "${SOMNIA_TESTNET_RPC}"
