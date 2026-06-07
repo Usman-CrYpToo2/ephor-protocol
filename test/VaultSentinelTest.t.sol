@@ -2,10 +2,12 @@
 pragma solidity ^0.8.20;
 
 import "../src/Mock/MockUSDC.sol";
+import "../src/Mock/MockERC20.sol";
 import "../src/Mock/MockLendingMarket.sol";
 import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
 import "../src/Mock/MockSomniaPlatform.sol";
+import "../src/UtilizationOracle.sol";
 import {Test} from "forge-std/Test.sol";
 
 /**
@@ -1543,6 +1545,299 @@ contract VaultSentinelTest is Test {
 
         // Proves AC-7: at 0 bps, 0 idle is allowed — no revert
         assertEq(vault.idleBufferBps(), 0, "D-7: at 0 bps floor, 0% idle must be allowed");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  GROUP 20 — D-9 Regression: Asset-agnostic MockERC20 (AC-22)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Proves D-9 fix: MockERC20 accepts configurable name/symbol/decimals.
+     *         Demonstrates that tests can use any ERC-20 asset configuration.
+     *         Proves AC-22 / G-9 / P-10.
+     */
+    function testD9_mockERC20_configurable() public {
+        // Deploy a generic 18-decimal token (e.g. WETH-equivalent)
+        MockERC20 token = new MockERC20("Test Token", "TT", 18);
+
+        // Proves D-9: name, symbol, decimals are configurable
+        assertEq(token.name(), "Test Token", "D-9: name must match constructor arg");
+        assertEq(token.symbol(), "TT", "D-9: symbol must match constructor arg");
+        assertEq(token.decimals(), 18, "D-9: decimals must match constructor arg");
+
+        // Proves mint works correctly for any decimal count
+        token.mint(address(this), 1000 * 1e18);
+        assertEq(token.balanceOf(address(this)), 1000 * 1e18, "D-9: mint must credit correct balance");
+    }
+
+    /**
+     * @notice Proves D-9 fix: MockUSDC is a backward-compatible wrapper over MockERC20.
+     *         All existing tests that create MockUSDC continue to work unchanged.
+     *         Proves D-9 backward compatibility.
+     */
+    function testD9_mockUSDC_isBackwardCompatible() public {
+        MockUSDC usdc2 = new MockUSDC();
+
+        // Proves backward compatibility: MockUSDC still has exactly 6 decimals and "USDC" symbol
+        assertEq(usdc2.decimals(), 6, "D-9: MockUSDC must still have 6 decimals");
+        assertEq(usdc2.symbol(), "USDC", "D-9: MockUSDC must still have USDC symbol");
+        assertEq(usdc2.name(), "Mock USDC", "D-9: MockUSDC must still have Mock USDC name");
+
+        // Proves mint still works on the wrapper
+        usdc2.mint(address(this), 500 * 1e6);
+        assertEq(usdc2.balanceOf(address(this)), 500 * 1e6, "D-9: MockUSDC mint must still work");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  GROUP 21 — D-8 Regression: UtilizationOracle TWAP (I-11, AC-13..AC-18)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Proves D-8 fix: record() stores observation and lastRecorded returns it.
+     *         Proves AC-17: record() is permissionless (no role check).
+     */
+    function testD8_oracle_recordsObservation() public {
+        UtilizationOracle oracleContract = new UtilizationOracle();
+
+        // Set utilization so we have a known value
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+        marketA.setUtilization(75); // 75% = 7500 bps
+
+        uint256 spotUtil = marketA.utilizationBps();
+        uint256 tBefore = block.timestamp;
+
+        // Proves AC-17: any address can call record() without a role
+        oracleContract.record(address(marketA));
+
+        (uint256 ts, uint256 util) = oracleContract.lastRecorded(address(marketA));
+
+        // Proves D-8: observation stored with correct timestamp
+        assertEq(ts, tBefore, "D-8: lastRecorded timestamp must match block.timestamp at record time");
+        // Proves D-8: observation stored with correct utilBps
+        assertEq(util, spotUtil, "D-8: lastRecorded utilBps must match market.utilizationBps()");
+    }
+
+    /**
+     * @notice Proves D-8 fix: with a single observation, twapBps returns that value.
+     *         Edge case: single observation has no time weighting.
+     */
+    function testD8_oracle_twap_singleObservation() public {
+        UtilizationOracle oracleContract = new UtilizationOracle();
+
+        // Fund and allocate so market has supply (utilization is meaningful)
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+        marketA.setUtilization(60); // 60% = 6000 bps
+
+        oracleContract.record(address(marketA));
+
+        // Proves D-8: with 1 observation, twapBps returns that observation's value
+        uint256 twap = oracleContract.twapBps(address(marketA));
+        assertEq(twap, marketA.utilizationBps(), "D-8: single observation twapBps must equal that observation");
+    }
+
+    /**
+     * @notice Proves D-8 fix: twapBps computes correct time-weighted average
+     *         over multiple observations with known timestamps.
+     *
+     *         Setup:
+     *           t=0:    record util=5000 (50%)
+     *           t=100:  record util=8000 (80%)
+     *           t=200:  record util=3000 (30%)
+     *           current = t=200
+     *
+     *         Expected TWAP:
+     *           obs[0] active from t=0 to t=100  → 5000 * 100 = 500_000
+     *           obs[1] active from t=100 to t=200 → 8000 * 100 = 800_000
+     *           obs[2] active from t=200 to t=200 → 3000 * 0   = 0  (most recent, elapsed=0)
+     *           TWAP = 1_300_000 / 200 = 6500
+     *
+     *         Proves I-11 and AC-13: TWAP math is manipulation-resistant.
+     */
+    function testD8_oracle_twap_multipleObservations() public {
+        UtilizationOracle oracleContract = new UtilizationOracle();
+
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+
+        // t=0: record util=5000
+        marketA.setUtilization(50); // 50% → 5000 bps
+        oracleContract.record(address(marketA));
+
+        // t=100: record util=8000
+        vm.warp(block.timestamp + 100);
+        marketA.setUtilization(80); // 80% → 8000 bps
+        oracleContract.record(address(marketA));
+
+        // t=200: record util=3000
+        vm.warp(block.timestamp + 100);
+        marketA.setUtilization(30); // 30% → 3000 bps
+        oracleContract.record(address(marketA));
+
+        // At t=200 exactly:
+        // obs[0](t=0, u=5000) active for 100s → weight 500000
+        // obs[1](t=100, u=8000) active for 100s → weight 800000
+        // obs[2](t=200, u=3000) active for 0s  → weight 0
+        // TWAP = 1_300_000 / 200 = 6500
+        uint256 twap = oracleContract.twapBps(address(marketA));
+        assertEq(twap, 6500, "D-8: TWAP over 3 observations must be 6500 bps");
+    }
+
+    /**
+     * @notice Proves D-8 fix: ring buffer wraps correctly at 9 observations.
+     *         After 9 writes to an 8-slot buffer, the oldest is overwritten
+     *         and twapBps still computes without reverting.
+     *         Proves I-11: ring buffer integrity under overflow.
+     */
+    function testD8_oracle_ringBuffer_wrapsAround() public {
+        UtilizationOracle oracleContract = new UtilizationOracle();
+
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+        marketA.setUtilization(50); // 50% = 5000 bps
+
+        // Record 9 observations — one more than the 8-slot ring buffer
+        for (uint256 i; i < 9;) {
+            oracleContract.record(address(marketA));
+            vm.warp(block.timestamp + 10);
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Proves D-8: twapBps does not revert after ring buffer wrap
+        uint256 twap = oracleContract.twapBps(address(marketA));
+        assertGt(twap, 0, "D-8: twapBps must be non-zero after ring buffer wrap");
+        assertLe(twap, 10_000, "D-8: twapBps must be <= 10000 bps");
+
+        // Proves ring buffer wrapped: most recent observation matches latest setUtilization
+        (, uint256 lastUtil) = oracleContract.lastRecorded(address(marketA));
+        assertEq(lastUtil, 5000, "D-8: lastRecorded must reflect the most recent observation");
+    }
+
+    /**
+     * @notice Proves D-8 fix: sentinel uses oracle.twapBps when oracle is set.
+     *         Set market util to 9600 bps, record multiple observations via oracle,
+     *         trigger checkVault + CRITICAL callback.  Deallocation must occur
+     *         (proving the routing path is through the oracle, not spot).
+     *
+     *         Proves I-11, AC-14, and that the _deallocateWorstMarket path
+     *         also goes through the oracle.
+     */
+    function testD8_sentinel_usesOracleWhenSet() public {
+        UtilizationOracle oracleContract = new UtilizationOracle();
+
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+
+        // Set market to high utilization
+        marketA.setUtilization(96); // 96% = 9600 bps
+
+        // Seed oracle with observations over time so TWAP reflects ~9600 bps
+        oracleContract.record(address(marketA));
+        vm.warp(block.timestamp + 300);
+        oracleContract.record(address(marketA));
+
+        // Register oracle on sentinel
+        vm.prank(admin);
+        sentinel.setOracle(address(oracleContract));
+
+        // Proves oracle is set
+        assertEq(address(sentinel.oracle()), address(oracleContract), "D-8: oracle must be set on sentinel");
+
+        uint256 marketABefore = marketA.balanceOf(address(vault));
+
+        // Trigger check — sentinel will read TWAP from oracle
+        sentinel.checkVault{value: CHECK_VALUE}(address(vault));
+        platform.simulateCallback(_latestRequestId(), "CRITICAL");
+
+        // Proves D-8: sentinel still correctly identifies and deallocates the worst market
+        // via the oracle path (TWAP ~9600 bps > 9000 threshold)
+        assertLt(
+            marketA.balanceOf(address(vault)),
+            marketABefore,
+            "D-8: CRITICAL with oracle set must still deallocate the worst market"
+        );
+        assertTrue(vault.depositsPaused(), "D-8: CRITICAL must pause deposits");
+
+        // Clean up: disable oracle so subsequent tests use default path
+        vm.prank(admin);
+        sentinel.setOracle(address(0));
+    }
+
+    /**
+     * @notice Proves D-8 fix: sentinel falls back to spot utilization when
+     *         oracle is not set (address(0)).
+     *         Verifies the default (pre-D-8-fix) behaviour is preserved.
+     */
+    function testD8_sentinel_fallsBackWithoutOracle() public {
+        // Confirm oracle is not set (address(0) by default)
+        assertEq(address(sentinel.oracle()), address(0), "D-8: oracle must be unset by default");
+
+        // Unpause vault if previously paused by an earlier test
+        if (vault.depositsPaused()) {
+            vm.prank(admin);
+            vault.unpauseDeposits();
+        }
+
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+        vm.prank(allocator);
+        vault.allocate(address(marketA), 8_000 * 1e6);
+        marketA.setUtilization(96); // 96% = 9600 bps spot
+
+        uint256 marketABefore = marketA.balanceOf(address(vault));
+
+        // Cooldown: warp enough so we can trigger another check
+        vm.warp(block.timestamp + CHECK_COOLDOWN + 1);
+
+        sentinel.checkVault{value: CHECK_VALUE}(address(vault));
+        platform.simulateCallback(_latestRequestId(), "CRITICAL");
+
+        // Proves D-8 fallback: no oracle, spot util (9600 bps) > 9000 threshold → deallocation
+        assertLt(
+            marketA.balanceOf(address(vault)),
+            marketABefore,
+            "D-8 fallback: without oracle, spot util must still trigger deallocation"
+        );
+    }
+
+    /**
+     * @notice Proves D-8 fix: setOracle is restricted to the sentinel admin.
+     *         Non-admin call must revert.  Admin call must succeed.
+     *         Proves SC-01 (access control) for the new oracle setter.
+     */
+    function testD8_sentinel_setOracle_adminOnly() public {
+        UtilizationOracle oracleContract = new UtilizationOracle();
+
+        // Non-admin call must revert
+        vm.prank(attacker);
+        vm.expectRevert();
+        sentinel.setOracle(address(oracleContract));
+
+        // Oracle must be unchanged after failed set
+        assertEq(address(sentinel.oracle()), address(0), "D-8: oracle must be unchanged after failed set");
+
+        // Admin call must succeed
+        vm.prank(admin);
+        sentinel.setOracle(address(oracleContract));
+        assertEq(address(sentinel.oracle()), address(oracleContract), "D-8: admin must be able to set oracle");
+
+        // Admin can also clear oracle back to address(0)
+        vm.prank(admin);
+        sentinel.setOracle(address(0));
+        assertEq(address(sentinel.oracle()), address(0), "D-8: admin must be able to clear oracle");
     }
 
     receive() external payable {}

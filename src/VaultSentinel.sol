@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./Interface/ISomnia.sol";
+import "./UtilizationOracle.sol";
 
 /**
  * @title  VaultSentinel
@@ -74,6 +75,14 @@ contract VaultSentinel {
     // ── Admin ────────────────────────────────────────────────────────────────
     address public admin;
 
+    // ── Utilization oracle (optional) ────────────────────────────────────────
+    /// @notice TWAP oracle for manipulation-resistant utilization readings.
+    ///         When address(0), sentinel falls back to reading spot utilizationBps()
+    ///         directly from each market (original behaviour).
+    ///         When set, _readMetrics and _deallocateWorstMarket both use
+    ///         oracle.twapBps(market) to prevent flash-loan manipulation (D-8).
+    IUtilizationOracle public oracle;
+
     // ── Risk levels ──────────────────────────────────────────────────────────
     enum RiskLevel {
         Safe,
@@ -121,6 +130,8 @@ contract VaultSentinel {
     event EmergencyDeallocated(address indexed vault, address indexed market, uint256 amount);
     event AgentIdSet(uint256 newId);
     event AdminTransferred(address newAdmin);
+    /// @notice Emitted when the utilization oracle address is changed.
+    event OracleSet(address indexed newOracle);
 
     // ── Modifiers ────────────────────────────────────────────────────────────
     modifier onlyPlatform() {
@@ -275,9 +286,17 @@ contract VaultSentinel {
         address worst = address(0);
         uint256 worstUtil = 0;
 
+        IUtilizationOracle _oracle = oracle; // cache to avoid repeated SLOAD
         for (uint256 i; i < cnt;) {
             address m = v.marketList(i);
-            uint256 u = IMarket(m).utilizationBps();
+            // D-8 fix: use TWAP oracle when set so deallocation target is
+            // also manipulation-resistant.  Fall back to spot otherwise.
+            uint256 u;
+            if (address(_oracle) != address(0)) {
+                u = _oracle.twapBps(m);
+            } else {
+                u = IMarket(m).utilizationBps();
+            }
             if (u > worstUtil) {
                 worstUtil = u;
                 worst = m;
@@ -324,11 +343,17 @@ contract VaultSentinel {
         mAddrs = new address[](mCount);
         mAllocBps = new uint256[](mCount);
         mUtilBps = new uint256[](mCount);
+        IUtilizationOracle _oracle = oracle; // cache to avoid repeated SLOAD
         for (uint256 i; i < mCount;) {
             address m = v.marketList(i);
             mAddrs[i] = m;
             mAllocBps[i] = v.marketAllocationBps(m);
-            mUtilBps[i] = IMarket(m).utilizationBps();
+            // D-8 fix: use TWAP oracle when set; fall back to spot when not.
+            if (address(_oracle) != address(0)) {
+                mUtilBps[i] = _oracle.twapBps(m);
+            } else {
+                mUtilBps[i] = IMarket(m).utilizationBps();
+            }
             unchecked {
                 ++i;
             }
@@ -407,6 +432,21 @@ contract VaultSentinel {
     function setLlmAgentId(uint256 newId) external onlyAdmin {
         llmAgentId = newId;
         emit AgentIdSet(newId);
+    }
+
+    /// @notice Set (or clear) the utilization oracle.
+    ///         Pass address(0) to fall back to direct spot reads (original behaviour).
+    ///         When a valid oracle is set, both _readMetrics and _deallocateWorstMarket
+    ///         will use oracle.twapBps() instead of market.utilizationBps().
+    ///
+    /// @dev    Resolves D-8.  Only the sentinel admin may call this.
+    ///         The oracle is optional — existing deployments without an oracle continue
+    ///         to operate identically to before.
+    ///
+    /// @param newOracle  Address of IUtilizationOracle implementation, or address(0) to disable.
+    function setOracle(address newOracle) external onlyAdmin {
+        oracle = IUtilizationOracle(newOracle);
+        emit OracleSet(newOracle);
     }
 
     function transferAdmin(address newAdmin) external onlyAdmin {
