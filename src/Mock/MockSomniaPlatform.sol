@@ -89,7 +89,7 @@ contract MockSomniaPlatform {
             callbackSelector: req.callbackSelector,
             subcommittee: sub,
             responses: empty,
-            responseCount: 1,
+            responseCount: 3,
             failureCount: 0,
             threshold: 2,
             createdAt: block.timestamp - 10,
@@ -140,6 +140,59 @@ contract MockSomniaPlatform {
         (bool ok,) = req.callbackAddress
             .call(abi.encodeWithSelector(req.callbackSelector, requestId, empty, ResponseStatus.TimedOut, fullReq));
         require(ok, "MockPlatform: timeout callback failed");
+        delete requests[requestId];
+    }
+
+    /**
+     * @notice Simulate a successful response where responseCount < threshold.
+     *         Used to test the D-6 consensus threshold verification path.
+     *         The sentinel should treat this as Failed (use HardLevel).
+     * @param requestId  ID from createRequest().
+     * @param verdict    The verdict string (will be ignored by sentinel since threshold not met).
+     */
+    function simulateBelowThreshold(uint256 requestId, string calldata verdict) external {
+        StoredReq storage req = requests[requestId];
+        require(req.exists, "MockPlatform: no such request");
+
+        Response[] memory resps = new Response[](1);
+        resps[0] = Response({
+            validator: address(this),
+            result: abi.encode(verdict),
+            status: ResponseStatus.Success,
+            receipt: uint256(keccak256(bytes(verdict))),
+            timestamp: block.timestamp,
+            executionCost: 0
+        });
+
+        address[] memory sub = new address[](1);
+        sub[0] = address(this);
+        Response[] memory empty = new Response[](0);
+
+        // responseCount (1) < threshold (2) — sentinel must treat as Failed
+        Request memory fullReq = Request({
+            id: requestId,
+            requester: msg.sender,
+            callbackAddress: req.callbackAddress,
+            callbackSelector: req.callbackSelector,
+            subcommittee: sub,
+            responses: empty,
+            responseCount: 1,
+            failureCount: 0,
+            threshold: 2,
+            createdAt: block.timestamp - 10,
+            deadline: block.timestamp + 60,
+            status: ResponseStatus.Success,
+            consensusType: ConsensusType.Majority,
+            remainingBudget: 0,
+            perAgentBudget: 0
+        });
+
+        (bool ok, bytes memory err) = req.callbackAddress
+            .call(abi.encodeWithSelector(req.callbackSelector, requestId, resps, ResponseStatus.Success, fullReq));
+        if (!ok) {
+            if (err.length > 0) assembly { revert(add(err, 32), mload(err)) }
+            revert("MockPlatform: callback reverted");
+        }
         delete requests[requestId];
     }
 

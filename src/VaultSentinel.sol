@@ -2,50 +2,64 @@
 pragma solidity ^0.8.20;
 
 import "./Interface/ISomnia.sol";
-import "./UtilizationOracle.sol";
+import {IUtilizationOracle} from "./UtilizationOracle.sol";
 
 /**
  * @title  VaultSentinel
  * @notice Autonomous AI risk monitor. Holds SENTINEL_ROLE on CuratedVault.
  *
- *  FLOW
- *  ────
- *  1. checkVault(vault)  — reads 5 metrics from vault contracts (on-chain view calls)
- *  2. Builds plain-English prompt from those numbers
- *  3. createRequest() → Somnia LLM Agent via platform
+ *  FLOW (v2 — D-5 and D-6 fixed)
+ *  ──────────────────────────────
+ *  1. checkVault(vault)  — reads on-chain metrics via oracle + vault views
+ *  2. Builds canonical feature-block prompt (lossless bps integers, SDD §9.3)
+ *  3. createRequest() → Somnia LLM agent (regime classifier: STABLE/WATCH/DETERIORATING)
  *  4. Validators run LLM deterministically (fixed seed, temp=0) → consensus
  *  5. Platform calls handleResponse() callback
- *  6. SAFE     → store snapshot, no action
- *     CAUTION  → store snapshot + emit RiskAlert
- *     CRITICAL → pauseDeposits() + emergencyDeallocate() on worst market
  *
- *  WHY ON-CHAIN DATA
- *  ─────────────────
- *  vault.totalAssets(), market.balanceOf(vault), market.utilizationBps()
- *  are free view calls to our own contracts — no external API, no DeFiLlama.
- *  Perfect for testnet where nothing appears in DeFiLlama.
+ *  D-6 FIX — Consensus threshold verification:
+ *    require(details.responseCount >= details.threshold) before processing response.
+ *    If not met, treat as Failed.
  *
- *  DEPOSIT SIZING  (from real docs)
- *  ─────────────────────────────────
- *  reserve = platform.getRequestDeposit()   (covers gas refunds, keeper, callback)
- *  reward  = LLM_COST_PER_AGENT × SUBCOMMITTEE_SIZE
- *  total   = reserve + reward
- *  Safe to send: 0.15 STT (excess rebated via receive())
+ *  D-5 FIX — Precedence rule (on-chain authority; AI is escalation modifier only):
+ *    1. assessOnChain(vault) → HardLevel (deterministic, from oracle + on-chain data)
+ *    2. Decode AI regime label (STABLE/WATCH/DETERIORATING + backward-compat mapping)
+ *    3. AiAdjustedLevel:
+ *         Critical  if AI == DETERIORATING and HardLevel >= Caution
+ *         Caution   if AI == WATCH        and HardLevel == Safe
+ *         HardLevel otherwise
+ *    4. EffectiveLevel = max(HardLevel, AiAdjustedLevel)
+ *       AI can NEVER lower the effective level.
+ *
+ *  ACTION MAPPING (EffectiveLevel):
+ *    Safe     → store snapshot, no action
+ *    Caution  → store snapshot + emit RiskAlert
+ *    Critical → pauseDeposits() + emergencyDeallocate() on highest-effectiveUtil market
+ *
+ *  AI FAILURE / TIMEOUT / UNKNOWN:
+ *    → EffectiveLevel = HardLevel (AI_UNAVAILABLE recorded). Fail-safe.
  *
  *  SECURITY
  *  ────────
  *  • onlyPlatform on handleResponse — nobody else can fake a verdict
  *  • pendingRequests mapping — prevents replay / orphan callbacks
- *  • Fail-safe: timeout/fail → CAUTION, never silently SAFE
  *  • 5-min cooldown per vault — prevents DoS
  *  • One in-flight check per vault
+ *  • assessOnChain uses oracle.twap (not spot) when oracle set and valid
+ *  • Deallocation uses oracle.effectiveUtil for true worst-market identification
+ *
+ *  IMPORTANT INVARIANTS
+ *  ────────────────────
+ *  • pendingRequests MUST remain public — MockSomniaPlatform looks it up by requestId
+ *  • handleResponse name MUST NOT change — selector passed to createRequest literally
  */
+
+// ── External vault interface ──────────────────────────────────────────────────
 
 interface IVault {
     function totalAssets() external view returns (uint256);
-    /// @dev Returns idle fraction in basis points (bps). 1% = 100 bps. Fixes D-3.
+    /// @dev Returns idle fraction in bps (1% = 100 bps). Fixes D-3.
     function idleBufferBps() external view returns (uint256);
-    /// @dev Returns market allocation fraction in basis points (bps). 1% = 100 bps. Fixes D-3.
+    /// @dev Returns market allocation fraction in bps. Fixes D-3.
     function marketAllocationBps(address market) external view returns (uint256);
     function marketCount() external view returns (uint256);
     function marketList(uint256 i) external view returns (address);
@@ -53,10 +67,16 @@ interface IVault {
     function emergencyDeallocate(address market, uint256 amount) external;
 }
 
+// ── Market spot interface (fallback when no oracle) ───────────────────────────
+
 interface IMarket {
     function balanceOf(address account) external view returns (uint256);
     function utilizationBps() external view returns (uint256);
 }
+
+// ── UtilizationOracle interface (full v2 API) ─────────────────────────────────
+
+// ════════════════════════════════════════════════════════════════════════════
 
 contract VaultSentinel {
     // ── Somnia platform ──────────────────────────────────────────────────────
@@ -64,30 +84,60 @@ contract VaultSentinel {
     // Mainnet:  0x5E5205CF39E766118C01636bED000A54D93163E6
     IAgentRequester public immutable platform;
 
-    // Get the real agent ID from agents.somnia.network → LLM Inference agent
+    /// @notice LLM Inference Agent ID (from agents.somnia.network).
     uint256 public llmAgentId;
 
-    // Default subcommittee size (matches platform default)
+    /// @notice Default subcommittee size (matches platform default).
     uint256 public constant SUBCOMMITTEE_SIZE = 3;
-    // Per-agent cost for LLM inference (from Somnia Gas Fees docs: 0.07 SOMI)
+
+    /// @notice Per-agent cost for LLM inference (from Somnia docs: 0.07 STT).
     uint256 public constant LLM_COST_PER_AGENT = 0.07 ether;
 
     // ── Admin ────────────────────────────────────────────────────────────────
     address public admin;
 
-    // ── Utilization oracle (optional) ────────────────────────────────────────
-    /// @notice TWAP oracle for manipulation-resistant utilization readings.
+    // ── Utilization oracle ────────────────────────────────────────────────────
+    /// @notice TWAP oracle for manipulation-resistant utilization readings (D-8).
     ///         When address(0), sentinel falls back to reading spot utilizationBps()
-    ///         directly from each market (original behaviour).
-    ///         When set, _readMetrics and _deallocateWorstMarket both use
-    ///         oracle.twapBps(market) to prevent flash-loan manipulation (D-8).
+    ///         directly from each market. When set, ALL utilization reads use the oracle.
     IUtilizationOracle public oracle;
+
+    // ── On-chain hard threshold constants (D-5) ───────────────────────────────
+    /// @notice TWAP window to use when querying oracle.twap() in assessOnChain.
+    uint256 public constant TWAP_WINDOW = 30 minutes;
+
+    /// @notice Utilization threshold for Caution classification (80%).
+    uint256 public constant CAUTION_UTIL_BPS = 8_000;
+
+    /// @notice Utilization threshold for Critical classification (95%).
+    uint256 public constant CRITICAL_UTIL_BPS = 9_500;
+
+    /// @notice Allocation threshold for Caution classification (25%).
+    uint256 public constant CAUTION_ALLOC_BPS = 2_500;
+
+    /// @notice Allocation threshold for Critical classification (40%).
+    uint256 public constant CRITICAL_ALLOC_BPS = 4_000;
+
+    /// @notice Caution utilization returned by oracle when history insufficient (80%).
+    uint256 public constant ORACLE_CAUTION_UTIL_BPS = 8_000;
+
+    /// @notice Minimum utilization threshold for emergency deallocation (90%).
+    uint256 public constant EMERGENCY_UTIL_THRESHOLD = 9_000;
 
     // ── Risk levels ──────────────────────────────────────────────────────────
     enum RiskLevel {
         Safe,
         Caution,
         Critical
+    }
+
+    // ── AI regime labels ─────────────────────────────────────────────────────
+    /// @dev Internal enum for parsed AI regime label.
+    enum RegimeLabel {
+        Stable,      // AI says risk is stable / acceptable
+        Watch,       // AI says risk is elevated but manageable
+        Deteriorating, // AI says risk is worsening
+        Unknown      // unrecognized output (fail-safe: no escalation)
     }
 
     // ── Per-vault registry ───────────────────────────────────────────────────
@@ -108,14 +158,14 @@ contract VaultSentinel {
         RiskLevel level;
         string rawVerdict;
         uint256 totalAssets;
-        /// @dev Idle buffer in basis points (bps). 1% = 100 bps. Renamed from idlePct (D-3 fix).
+        /// @dev Idle buffer in bps (1% = 100 bps). Renamed from idlePct (D-3 fix).
         uint256 idleBps;
     }
     mapping(address => RiskSnapshot[]) private _history;
 
     // ── In-flight request tracking ───────────────────────────────────────────
-    // IMPORTANT: must use pendingRequests (not _pending) so MockPlatform can
-    // look up the vault from the requestId in tests
+    // IMPORTANT: pendingRequests MUST remain public — MockSomniaPlatform looks
+    // up the vault address by requestId during tests. Do NOT rename to _pending.
     mapping(uint256 => address) public pendingRequests; // requestId → vault
     mapping(address => uint256) public activeRequest; // vault → requestId (0=none)
 
@@ -132,6 +182,12 @@ contract VaultSentinel {
     event AdminTransferred(address newAdmin);
     /// @notice Emitted when the utilization oracle address is changed.
     event OracleSet(address indexed newOracle);
+    /// @notice Emitted when AI response was ignored because consensus threshold was not met (D-6).
+    event ConsensusThresholdNotMet(address indexed vault, uint256 requestId, uint256 responseCount, uint256 threshold);
+    /// @notice Emitted when AI is unavailable; on-chain HardLevel used instead (D-5).
+    event AiUnavailable(address indexed vault, RiskLevel hardLevel, string reason);
+    /// @notice Emitted when AI escalates the HardLevel (D-5 precedence rule applied).
+    event AiEscalated(address indexed vault, RiskLevel hardLevel, RiskLevel effectiveLevel, string aiLabel);
 
     // ── Modifiers ────────────────────────────────────────────────────────────
     modifier onlyPlatform() {
@@ -157,13 +213,16 @@ contract VaultSentinel {
     /**
      * @notice Trigger an AI risk check for a registered vault.
      *
-     *         Reads on-chain metrics → builds LLM prompt → sends to Somnia platform.
-     *         Result arrives async in handleResponse().
+     *         Reads on-chain metrics → builds canonical feature-block prompt →
+     *         sends to Somnia LLM platform.  Result arrives async in handleResponse().
      *
-     * @dev    msg.value must cover:
-     *           platform.getRequestDeposit()   (operations reserve)
-     *         + LLM_COST_PER_AGENT × SUBCOMMITTEE_SIZE  (validator rewards)
-     *         Safe value: 0.15 STT. Excess is rebated to this contract.
+     * @dev    If oracle is set, calls oracle.update(market) for each market before
+     *         reading metrics (ensures TWAP is fresh).
+     *         msg.value must cover:
+     *           platform.getRequestDeposit()
+     *           + LLM_COST_PER_AGENT × SUBCOMMITTEE_SIZE
+     *
+     * @param  vault  The registered vault to check.
      */
     function checkVault(address vault) external payable {
         VaultInfo storage info = vaultInfo[vault];
@@ -172,6 +231,17 @@ contract VaultSentinel {
         require(activeRequest[vault] == 0, "check in progress");
         require(msg.value >= LLM_COST_PER_AGENT * SUBCOMMITTEE_SIZE, "insufficient deposit");
 
+        // ── If oracle is set, refresh it for each market before reading metrics ──
+        IUtilizationOracle _oracle = oracle;
+        if (address(_oracle) != address(0)) {
+            uint256 cnt = IVault(vault).marketCount();
+            for (uint256 i; i < cnt; ) {
+                address m = IVault(vault).marketList(i);
+                try _oracle.update(m) {} catch {}
+                unchecked { ++i; }
+            }
+        }
+
         // ── Read all metrics from vault's own contracts (zero external API) ──
         (
             uint256 totalA,
@@ -179,32 +249,36 @@ contract VaultSentinel {
             uint256 mCount,
             address[] memory mAddrs,
             uint256[] memory mAllocBps,
-            uint256[] memory mUtilBps
+            uint256[] memory mUtilBps,
+            uint256[] memory mTwapBps,
+            bool[] memory mSpike
         ) = _readMetrics(vault);
 
-        // ── Build user prompt ──────────────────────────────────────────────
-        string memory userPrompt = _buildUserPrompt(totalA, idleBps, mCount, mAddrs, mAllocBps, mUtilBps);
+        // ── Build canonical feature-block prompt (§9.3) ───────────────────
+        string memory userPrompt = _buildUserPrompt(
+            totalA, idleBps, mCount, mAddrs, mAllocBps, mUtilBps, mTwapBps, mSpike
+        );
 
         // ── Encode LLM agent call ──────────────────────────────────────────
-        // inferString(prompt, system, chainOfThought, allowedValues)
-        // allowedValues constrains the model to one of the three words exactly.
+        // AI is a regime classifier (SDD §7.3): STABLE / WATCH / DETERIORATING
+        // Backward-compatible labels SAFE / CAUTION / CRITICAL also accepted.
         string[] memory allowed = new string[](3);
-        allowed[0] = "SAFE";
-        allowed[1] = "CAUTION";
-        allowed[2] = "CRITICAL";
+        allowed[0] = "STABLE";
+        allowed[1] = "WATCH";
+        allowed[2] = "DETERIORATING";
         bytes memory payload = abi.encodeWithSelector(
             ILLMInferenceAgent.inferString.selector,
-            userPrompt, // prompt  — vault metrics
-            _systemPrompt(), // system  — classification instructions
-            false, // chainOfThought — off, we want a single word
-            allowed // allowedValues  — constrain output
+            userPrompt,       // prompt   — vault metrics feature block
+            _systemPrompt(),  // system   — regime classifier instructions
+            false,            // chainOfThought — off; constrained output only
+            allowed           // allowedValues — constrains model output
         );
 
         // ── Send to Somnia platform ────────────────────────────────────────
         uint256 reqId = platform.createRequest{value: msg.value}(
             llmAgentId,
             address(this),
-            this.handleResponse.selector, // ← exact name from real docs
+            this.handleResponse.selector, // ← exact name; must not be renamed
             payload
         );
 
@@ -217,18 +291,100 @@ contract VaultSentinel {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  STEP 2 — SOMNIA PLATFORM DELIVERS THE VERDICT
+    //  STEP 2 — ON-CHAIN HARD GUARDS (D-5 — assessOnChain)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Compute the deterministic HardLevel for `vault` using only on-chain data.
+     *
+     *  For each enabled market:
+     *    • Reads oracle.twap(market, TWAP_WINDOW) if oracle set and isValid.
+     *    • Falls back to oracle.cautionUtilBps (8000) if oracle set but not yet valid.
+     *    • Falls back to spot utilizationBps() if no oracle.
+     *  Computes maxEffectiveUtilBps, maxAllocBps, idleBps.
+     *  Returns:
+     *    Critical  if maxEffectiveUtilBps > CRITICAL_UTIL_BPS AND maxAllocBps > CRITICAL_ALLOC_BPS
+     *    Caution   if maxEffectiveUtilBps > CAUTION_UTIL_BPS  OR  maxAllocBps > CAUTION_ALLOC_BPS
+     *    Safe      otherwise
+     *
+     * @param  vault  The vault to assess.
+     * @return hardLevel  The deterministic hard risk classification.
+     */
+    function assessOnChain(address vault) public view returns (RiskLevel hardLevel) {
+        IVault v = IVault(vault);
+        uint256 cnt = v.marketCount();
+
+        uint256 maxEffectiveUtilBps = 0;
+        uint256 maxAllocBps = 0;
+
+        IUtilizationOracle _oracle = oracle;
+
+        for (uint256 i; i < cnt; ) {
+            address m = v.marketList(i);
+
+            // Allocation bps — vault-internal, not flash-loan manipulable
+            uint256 allocBps = v.marketAllocationBps(m);
+            if (allocBps > maxAllocBps) {
+                maxAllocBps = allocBps;
+            }
+
+            // Utilization — manipulation-resistant via oracle when available
+            uint256 utilBps;
+            if (address(_oracle) != address(0)) {
+                bool valid = _oracle.isValid(m);
+                if (valid) {
+                    utilBps = _oracle.twap(m, TWAP_WINDOW);
+                } else {
+                    // Oracle not yet valid for this market — conservative
+                    utilBps = ORACLE_CAUTION_UTIL_BPS;
+                }
+            } else {
+                // No oracle — fall back to spot (legacy behaviour)
+                utilBps = IMarket(m).utilizationBps();
+            }
+
+            if (utilBps > maxEffectiveUtilBps) {
+                maxEffectiveUtilBps = utilBps;
+            }
+
+            unchecked { ++i; }
+        }
+
+        // Deterministic classification (SDD §7.2)
+        if (maxEffectiveUtilBps > CRITICAL_UTIL_BPS && maxAllocBps > CRITICAL_ALLOC_BPS) {
+            return RiskLevel.Critical;
+        }
+        if (maxEffectiveUtilBps > CAUTION_UTIL_BPS || maxAllocBps > CAUTION_ALLOC_BPS) {
+            return RiskLevel.Caution;
+        }
+        return RiskLevel.Safe;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  STEP 3 — SOMNIA PLATFORM DELIVERS THE VERDICT
     //
     //  Function name is handleResponse — EXACT name from real Somnia docs.
     //  Selector: this.handleResponse.selector passed to createRequest().
     //  Only the platform contract may call this.
     // ════════════════════════════════════════════════════════════════════════
 
+    /**
+     * @notice Callback invoked by the Somnia platform with the AI verdict.
+     *
+     *  D-6 fix: verify responseCount >= threshold before trusting the response.
+     *  D-5 fix: compute HardLevel on-chain; AI is an escalation modifier only.
+     *           EffectiveLevel = max(HardLevel, AiAdjustedLevel).
+     *
+     * @param  requestId  Matches the ID returned by checkVault → createRequest.
+     * @param  responses  Array of validator responses (use responses[0].result).
+     * @param  status     ResponseStatus enum (Success=2, Failed=3, TimedOut=4).
+     * @param  details    Full Request struct — used for responseCount/threshold (D-6).
+     */
     function handleResponse(
         uint256 requestId,
         Response[] memory responses,
         ResponseStatus status,
-        Request memory /* details */
+        Request memory details
     )
         external
         onlyPlatform
@@ -236,32 +392,93 @@ contract VaultSentinel {
         address vault = pendingRequests[requestId];
         require(vault != address(0), "unknown request");
 
+        // CEI: clear pending state BEFORE any external calls
         delete pendingRequests[requestId];
         delete activeRequest[vault];
 
         VaultInfo storage info = vaultInfo[vault];
 
-        // ── Fail-safe: timeout/failure → CAUTION (never silently SAFE) ──────
-        if (status == ResponseStatus.TimedOut || status == ResponseStatus.Failed || responses.length == 0) {
-            _store(vault, RiskLevel.Caution, "AI_UNAVAILABLE");
-            info.lastLevel = RiskLevel.Caution;
-            emit RiskAlert(vault, RiskLevel.Caution, "AI_UNAVAILABLE");
+        // ── Compute on-chain HardLevel (always; D-5) ───────────────────────
+        RiskLevel hardLevel = assessOnChain(vault);
+
+        // ── AI failure path — EffectiveLevel = max(Caution, HardLevel) ──────
+        // Fail-safe: AI absence never produces Silent Safe — always at least Caution.
+        // This preserves P-5 and the original "timeout → at least CAUTION" guarantee.
+        // D-5: HardLevel is the floor; if HardLevel > Caution, that fires instead.
+        if (
+            status == ResponseStatus.TimedOut ||
+            status == ResponseStatus.Failed ||
+            responses.length == 0
+        ) {
+            RiskLevel failLevel = hardLevel > RiskLevel.Caution ? hardLevel : RiskLevel.Caution;
+            _applyEffectiveLevel(vault, failLevel, "AI_UNAVAILABLE");
+            info.lastLevel = failLevel;
+            emit AiUnavailable(vault, failLevel, "AI_UNAVAILABLE");
             return;
         }
 
-        // ── Decode the single-word LLM response ───────────────────────────
+        // ── D-6: Verify consensus threshold before trusting response ───────
+        if (details.responseCount < details.threshold) {
+            emit ConsensusThresholdNotMet(vault, requestId, details.responseCount, details.threshold);
+            // Treat as Failed: EffectiveLevel = max(Caution, HardLevel)
+            RiskLevel consensusFailLevel = hardLevel > RiskLevel.Caution ? hardLevel : RiskLevel.Caution;
+            _applyEffectiveLevel(vault, consensusFailLevel, "CONSENSUS_NOT_MET");
+            info.lastLevel = consensusFailLevel;
+            emit AiUnavailable(vault, consensusFailLevel, "CONSENSUS_NOT_MET");
+            return;
+        }
+
+        // ── Decode AI regime label ─────────────────────────────────────────
         string memory raw = abi.decode(responses[0].result, (string));
-        RiskLevel level = _parse(raw);
+        RegimeLabel aiLabel = _parseRegimeLabel(raw);
 
-        _store(vault, level, raw);
-        info.lastLevel = level;
+        // ── Unknown AI output → treat as failure (fail-safe Caution floor) ─
+        // Preserves original "unknown → CAUTION" behavior from v1.
+        if (aiLabel == RegimeLabel.Unknown) {
+            RiskLevel unknownFailLevel = hardLevel > RiskLevel.Caution ? hardLevel : RiskLevel.Caution;
+            _applyEffectiveLevel(vault, unknownFailLevel, raw);
+            info.lastLevel = unknownFailLevel;
+            emit AiUnavailable(vault, unknownFailLevel, raw);
+            return;
+        }
 
-        emit VerdictReceived(vault, level, raw);
-        emit RiskAlert(vault, level, raw);
+        // ── D-5: Apply precedence rule — AI can only escalate ─────────────
+        //  AiAdjustedLevel:
+        //    Critical  if AI == DETERIORATING and HardLevel >= Caution
+        //    Caution   if AI == WATCH         and HardLevel == Safe
+        //    HardLevel otherwise
+        RiskLevel aiAdjustedLevel = hardLevel;
+        if (aiLabel == RegimeLabel.Deteriorating && hardLevel >= RiskLevel.Caution) {
+            aiAdjustedLevel = RiskLevel.Critical;
+        } else if (aiLabel == RegimeLabel.Watch && hardLevel == RiskLevel.Safe) {
+            aiAdjustedLevel = RiskLevel.Caution;
+        }
+
+        // EffectiveLevel = max(HardLevel, AiAdjustedLevel)
+        RiskLevel effectiveLevel = hardLevel > aiAdjustedLevel ? hardLevel : aiAdjustedLevel;
+
+        if (effectiveLevel != hardLevel) {
+            emit AiEscalated(vault, hardLevel, effectiveLevel, raw);
+        }
+
+        _applyEffectiveLevel(vault, effectiveLevel, raw);
+        info.lastLevel = effectiveLevel;
+
+        emit VerdictReceived(vault, effectiveLevel, raw);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — APPLY EFFECTIVE LEVEL
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// @dev Apply the EffectiveLevel: store snapshot + emit events + trigger actions.
+    function _applyEffectiveLevel(address vault, RiskLevel level, string memory reason) internal {
+        _store(vault, level, reason);
+        emit RiskAlert(vault, level, reason);
 
         if (level == RiskLevel.Critical) {
-            info.criticalCount++;
-            _respondToCritical(vault, raw);
+            vaultInfo[vault].criticalCount++;
+            _respondToCritical(vault, reason);
         }
     }
 
@@ -278,6 +495,14 @@ contract VaultSentinel {
         _deallocateWorstMarket(vault);
     }
 
+    /**
+     * @dev Find the market with the highest effective utilization and withdraw 50%.
+     *      Only acts when effectiveUtil > EMERGENCY_UTIL_THRESHOLD (9000 bps).
+     *
+     *      D-1 fix: `worst` is only updated inside the `if (u > worstUtil)` block.
+     *      D-8 fix: when oracle is set, uses oracle.effectiveUtil() (manipulation-resistant).
+     *               When oracle is not set, falls back to spot utilizationBps().
+     */
     function _deallocateWorstMarket(address vault) internal {
         IVault v = IVault(vault);
         uint256 cnt = v.marketCount();
@@ -286,27 +511,30 @@ contract VaultSentinel {
         address worst = address(0);
         uint256 worstUtil = 0;
 
-        IUtilizationOracle _oracle = oracle; // cache to avoid repeated SLOAD
-        for (uint256 i; i < cnt;) {
+        IUtilizationOracle _oracle = oracle;
+        for (uint256 i; i < cnt; ) {
             address m = v.marketList(i);
-            // D-8 fix: use TWAP oracle when set so deallocation target is
-            // also manipulation-resistant.  Fall back to spot otherwise.
             uint256 u;
             if (address(_oracle) != address(0)) {
-                u = _oracle.twapBps(m);
+                // effectiveUtil is non-view (calls update internally) — use try/catch
+                try _oracle.effectiveUtil(m) returns (uint256 util, bool) {
+                    u = util;
+                } catch {
+                    u = IMarket(m).utilizationBps();
+                }
             } else {
                 u = IMarket(m).utilizationBps();
             }
+            // D-1 fix: only update worst INSIDE the guard
             if (u > worstUtil) {
                 worstUtil = u;
                 worst = m;
             }
-            unchecked {
-                ++i;
-            }
+            unchecked { ++i; }
         }
-        // Only pull if util > 90%  (9000 bps)
-        if (worst == address(0) || worstUtil < 9_000) return;
+
+        // Only pull if util > EMERGENCY_UTIL_THRESHOLD (9000 bps = 90%)
+        if (worst == address(0) || worstUtil < EMERGENCY_UTIL_THRESHOLD) return;
 
         uint256 bal = IMarket(worst).balanceOf(vault);
         if (bal == 0) return;
@@ -322,8 +550,10 @@ contract VaultSentinel {
     //  INTERNAL — READ METRICS (pure on-chain)
     // ════════════════════════════════════════════════════════════════════════
 
-    /// @dev Reads all vault metrics. All ratio values are in basis points (bps).
-    ///      idleBps and mAllocBps are bps (10_000 = 100%). Fixes D-3.
+    /**
+     * @dev Reads all vault metrics in bps. Returns spot, TWAP, and spike flag per market.
+     *      When oracle is set, uses oracle TWAP for utilization. Otherwise uses spot.
+     */
     function _readMetrics(address vault)
         internal
         view
@@ -333,7 +563,9 @@ contract VaultSentinel {
             uint256 mCount,
             address[] memory mAddrs,
             uint256[] memory mAllocBps,
-            uint256[] memory mUtilBps
+            uint256[] memory mUtilBps,
+            uint256[] memory mTwapBps,
+            bool[] memory mSpike
         )
     {
         IVault v = IVault(vault);
@@ -343,66 +575,126 @@ contract VaultSentinel {
         mAddrs = new address[](mCount);
         mAllocBps = new uint256[](mCount);
         mUtilBps = new uint256[](mCount);
-        IUtilizationOracle _oracle = oracle; // cache to avoid repeated SLOAD
-        for (uint256 i; i < mCount;) {
+        mTwapBps = new uint256[](mCount);
+        mSpike = new bool[](mCount);
+
+        IUtilizationOracle _oracle = oracle;
+        for (uint256 i; i < mCount; ) {
             address m = v.marketList(i);
             mAddrs[i] = m;
             mAllocBps[i] = v.marketAllocationBps(m);
-            // D-8 fix: use TWAP oracle when set; fall back to spot when not.
+
             if (address(_oracle) != address(0)) {
-                mUtilBps[i] = _oracle.twapBps(m);
+                // Read TWAP (view) — do not call effectiveUtil here (non-view)
+                uint256 twapVal = _oracle.twap(m, TWAP_WINDOW);
+                uint256 spotVal = IMarket(m).utilizationBps();
+                uint256 delta = spotVal > twapVal ? spotVal - twapVal : 0;
+                bool spikeFlag = delta > 1_000; // 10% = 1000 bps (default spikeToleranceBps)
+                mUtilBps[i] = spikeFlag ? twapVal : spotVal;
+                mTwapBps[i] = twapVal;
+                mSpike[i] = spikeFlag;
             } else {
-                mUtilBps[i] = IMarket(m).utilizationBps();
+                uint256 spotVal = IMarket(m).utilizationBps();
+                mUtilBps[i] = spotVal;
+                mTwapBps[i] = spotVal;
+                mSpike[i] = false;
             }
-            unchecked {
-                ++i;
-            }
+            unchecked { ++i; }
         }
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  INTERNAL — PROMPT CONSTRUCTION
+    //  INTERNAL — PROMPT CONSTRUCTION (§9.3 canonical feature block)
     // ════════════════════════════════════════════════════════════════════════
 
+    /// @dev System prompt for the regime classifier (SDD §9.4).
+    ///      allowedValues constrain the model to STABLE/WATCH/DETERIORATING.
     function _systemPrompt() internal pure returns (string memory) {
-        return "You are a DeFi vault risk classifier. " "Respond with EXACTLY ONE WORD: SAFE, CAUTION, or CRITICAL. "
-            "No punctuation. No explanation. No newline. One word only. "
-            "CRITICAL if ANY: (1) any market allocation >40%; " "(2) idle buffer <5%; (3) any market utilization >95%. "
-            "CAUTION if ANY: (1) any market allocation 25-40%; "
-            "(2) idle buffer 5-10%; (3) any market utilization 80-95%. " "SAFE if none of the above. "
-            "If data missing or inconsistent: CAUTION. " "RESPOND WITH ONE WORD ONLY: SAFE, CAUTION, or CRITICAL.";
+        return "You are a portfolio-risk regime classifier for a yield vault holding a single configured asset. "
+            "Inputs are canonical integer features: ratios in basis points (dimensionless, asset-agnostic), "
+            "amounts in the vault asset native units with decimal count given in the PORTFOLIO header. "
+            "The smart contract enforces all hard numeric limits. "
+            "Your job: judge the overall trajectory and concentration of risk no single limit captures. "
+            "A spike=1 means a flash-loan manipulation was detected -- treat this as an additional risk signal. "
+            "Output exactly one of: STABLE, WATCH, DETERIORATING. No other text.";
     }
 
-    /// @dev Builds the LLM user prompt from vault metrics.
-    ///      All ratio values (idleBps, mAllocBps, mUtilBps) are in basis points.
-    ///      10000 bps = 100%. Values are emitted losslessly with no truncation (P-4, D-3).
+    /**
+     * @dev Build the canonical feature-block user prompt (SDD §9.3).
+     *      All values are integers (bps or raw amounts). No truncation.
+     *      Lossless canonical inputs (P-4, L-2, D-2 fix: no _u formatter).
+     */
     function _buildUserPrompt(
         uint256 totalA,
         uint256 idleBps,
         uint256 mCount,
         address[] memory,
         uint256[] memory mAllocBps,
-        uint256[] memory mUtilBps
+        uint256[] memory mUtilBps,
+        uint256[] memory mTwapBps,
+        bool[] memory mSpike
     ) internal pure returns (string memory s) {
-        s = string(abi.encodePacked("Vault: total=", _u(totalA / 1_000_000), " idle=", _u(idleBps), "bps. "));
-        for (uint256 i; i < mCount;) {
+        s = string(
+            abi.encodePacked(
+                "PORTFOLIO|ta=", _u(totalA), "|idle=", _u(idleBps), "|mkts=", _u(mCount), " "
+            )
+        );
+        for (uint256 i; i < mCount; ) {
             s = string(
                 abi.encodePacked(
-                    s, "Market", _u(i + 1), ": ", "alloc=", _u(mAllocBps[i]), "bps ", "util=", _u(mUtilBps[i]), "bps. "
+                    s,
+                    "M", _u(i + 1),
+                    "|util=", _u(mUtilBps[i]),
+                    "|twap=", _u(mTwapBps[i]),
+                    "|spike=", mSpike[i] ? "1" : "0",
+                    "|alloc=", _u(mAllocBps[i]),
+                    " "
                 )
             );
-            unchecked {
-                ++i;
-            }
+            unchecked { ++i; }
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — PARSING
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @dev Parse AI output into a RegimeLabel.
+     *      Accepts new labels: STABLE, WATCH, DETERIORATING.
+     *      Backward-compatible mapping: CRITICAL→DETERIORATING, CAUTION→WATCH, SAFE→STABLE.
+     *      Unrecognized → Unknown (no escalation).
+     */
+    function _parseRegimeLabel(string memory raw) internal pure returns (RegimeLabel) {
+        bytes32 h = keccak256(bytes(raw));
+
+        // New labels (SDD §7.3)
+        if (h == keccak256(bytes("DETERIORATING"))) return RegimeLabel.Deteriorating;
+        if (h == keccak256(bytes("WATCH"))) return RegimeLabel.Watch;
+        if (h == keccak256(bytes("STABLE"))) return RegimeLabel.Stable;
+
+        // Backward-compatible mapping (old allowedValues)
+        if (h == keccak256(bytes("CRITICAL"))) return RegimeLabel.Deteriorating;
+        if (h == keccak256(bytes("CAUTION"))) return RegimeLabel.Watch;
+        if (h == keccak256(bytes("SAFE"))) return RegimeLabel.Stable;
+
+        // Unknown output — no escalation (fail-safe)
+        return RegimeLabel.Unknown;
+    }
+
+    /// @dev Legacy parse function kept for backward-compat views (getLatestRisk stores raw string).
     function _parse(string memory raw) internal pure returns (RiskLevel) {
         bytes32 h = keccak256(bytes(raw));
-        if (h == keccak256(bytes("CRITICAL"))) return RiskLevel.Critical;
-        if (h == keccak256(bytes("CAUTION"))) return RiskLevel.Caution;
-        if (h == keccak256(bytes("SAFE"))) return RiskLevel.Safe;
-        return RiskLevel.Caution; // unknown → fail-safe
+        if (h == keccak256(bytes("CRITICAL")) || h == keccak256(bytes("DETERIORATING"))) {
+            return RiskLevel.Critical;
+        }
+        if (h == keccak256(bytes("CAUTION")) || h == keccak256(bytes("WATCH"))) {
+            return RiskLevel.Caution;
+        }
+        if (h == keccak256(bytes("SAFE")) || h == keccak256(bytes("STABLE"))) {
+            return RiskLevel.Safe;
+        }
+        return RiskLevel.Caution; // unknown → fail-safe caution
     }
 
     function _store(address vault, RiskLevel level, string memory verdict) internal {
@@ -421,6 +713,7 @@ contract VaultSentinel {
     //  ADMIN
     // ════════════════════════════════════════════════════════════════════════
 
+    /// @notice Register a vault for monitoring.
     function registerVault(address vault, bool autoPause) external onlyAdmin {
         require(vault != address(0), "zero vault");
         require(!vaultInfo[vault].registered, "already registered");
@@ -429,26 +722,26 @@ contract VaultSentinel {
         emit VaultRegistered(vault, autoPause);
     }
 
+    /// @notice Update the LLM agent ID (from agents.somnia.network).
     function setLlmAgentId(uint256 newId) external onlyAdmin {
         llmAgentId = newId;
         emit AgentIdSet(newId);
     }
 
-    /// @notice Set (or clear) the utilization oracle.
-    ///         Pass address(0) to fall back to direct spot reads (original behaviour).
-    ///         When a valid oracle is set, both _readMetrics and _deallocateWorstMarket
-    ///         will use oracle.twapBps() instead of market.utilizationBps().
-    ///
-    /// @dev    Resolves D-8.  Only the sentinel admin may call this.
-    ///         The oracle is optional — existing deployments without an oracle continue
-    ///         to operate identically to before.
-    ///
-    /// @param newOracle  Address of IUtilizationOracle implementation, or address(0) to disable.
+    /**
+     * @notice Set (or clear) the utilization oracle.
+     *         Pass address(0) to fall back to direct spot reads (original behaviour).
+     *         When a valid oracle is set, all utilization reads go through it.
+     *
+     * @dev    Resolves D-8.  Only the sentinel admin may call this.
+     * @param  newOracle  Address of IUtilizationOracle implementation, or address(0).
+     */
     function setOracle(address newOracle) external onlyAdmin {
         oracle = IUtilizationOracle(newOracle);
         emit OracleSet(newOracle);
     }
 
+    /// @notice Transfer sentinel admin to a new address.
     function transferAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "zero");
         admin = newAdmin;
@@ -463,7 +756,11 @@ contract VaultSentinel {
         return _history[vault];
     }
 
-    function getLatestRisk(address vault) external view returns (RiskLevel level, uint256 ts, string memory verdict) {
+    function getLatestRisk(address vault)
+        external
+        view
+        returns (RiskLevel level, uint256 ts, string memory verdict)
+    {
         RiskSnapshot[] storage h = _history[vault];
         if (h.length == 0) return (RiskLevel.Safe, 0, "NOT_CHECKED");
         RiskSnapshot storage latest = h[h.length - 1];
@@ -482,10 +779,14 @@ contract VaultSentinel {
     //  HELPERS
     // ════════════════════════════════════════════════════════════════════════
 
+    /**
+     * @dev Integer-to-decimal-string conversion.
+     *      D-2 fix: counters properly advance — no infinite loop.
+     */
     function _u(uint256 v) internal pure returns (string memory) {
         if (v == 0) return "0";
         uint256 t = v;
-        uint256 d;
+        uint256 d = 0;
         while (t != 0) {
             d++;
             t /= 10;
