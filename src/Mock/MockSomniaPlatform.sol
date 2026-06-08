@@ -196,6 +196,91 @@ contract MockSomniaPlatform {
         delete requests[requestId];
     }
 
+    /**
+     * @notice Simulate a number-score callback (Tier-2 per-market inferNumber).
+     * @param requestId  ID from createRequest().
+     * @param score      Integer score value (will be abi.encoded as uint256).
+     */
+    function simulateNumberCallback(uint256 requestId, uint256 score) external {
+        StoredReq storage req = requests[requestId];
+        require(req.exists, "MockPlatform: no such request");
+
+        Response[] memory resps = new Response[](1);
+        resps[0] = Response({
+            validator: address(this),
+            result: abi.encode(score),
+            status: ResponseStatus.Success,
+            receipt: uint256(keccak256(abi.encode(score))),
+            timestamp: block.timestamp,
+            executionCost: 0
+        });
+
+        address[] memory sub = new address[](1);
+        sub[0] = address(this);
+        Response[] memory empty = new Response[](0);
+
+        Request memory fullReq = Request({
+            id: requestId,
+            requester: msg.sender,
+            callbackAddress: req.callbackAddress,
+            callbackSelector: req.callbackSelector,
+            subcommittee: sub,
+            responses: empty,
+            responseCount: 3,
+            failureCount: 0,
+            threshold: 2,
+            createdAt: block.timestamp - 10,
+            deadline: block.timestamp + 60,
+            status: ResponseStatus.Success,
+            consensusType: ConsensusType.Majority,
+            remainingBudget: 0,
+            perAgentBudget: 0
+        });
+
+        (bool ok, bytes memory err) = req.callbackAddress
+            .call(abi.encodeWithSelector(req.callbackSelector, requestId, resps, ResponseStatus.Success, fullReq));
+        if (!ok) {
+            if (err.length > 0) assembly { revert(add(err, 32), mload(err)) }
+            revert("MockPlatform: number callback reverted");
+        }
+        delete requests[requestId];
+    }
+
+    /**
+     * @notice Simulate a failed number-score callback (Tier-2 fail-safe path).
+     * @param requestId  ID from createRequest().
+     */
+    function simulateNumberFailed(uint256 requestId) external {
+        StoredReq storage req = requests[requestId];
+        require(req.exists, "MockPlatform: no such request");
+
+        Response[] memory empty = new Response[](0);
+        address[] memory sub = new address[](0);
+
+        Request memory fullReq = Request({
+            id: requestId,
+            requester: msg.sender,
+            callbackAddress: req.callbackAddress,
+            callbackSelector: req.callbackSelector,
+            subcommittee: sub,
+            responses: empty,
+            responseCount: 0,
+            failureCount: 3,
+            threshold: 2,
+            createdAt: block.timestamp - 10,
+            deadline: block.timestamp + 60,
+            status: ResponseStatus.Failed,
+            consensusType: ConsensusType.Majority,
+            remainingBudget: 0,
+            perAgentBudget: 0
+        });
+
+        (bool ok,) = req.callbackAddress
+            .call(abi.encodeWithSelector(req.callbackSelector, requestId, empty, ResponseStatus.Failed, fullReq));
+        require(ok, "MockPlatform: failed callback reverted");
+        delete requests[requestId];
+    }
+
     function setMinimumDeposit(uint256 amount) external {
         minimumDeposit = amount;
     }

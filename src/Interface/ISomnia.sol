@@ -128,6 +128,16 @@ interface ILLMInferenceAgent {
         bool chainOfThought,
         string[] calldata allowedValues
     ) external returns (string memory response);
+
+    // Returns a bounded integer score in [minValue, maxValue].
+    // Used by Tier-2 per-market scoring: one call per market, results normalized to weights.
+    function inferNumber(
+        string calldata prompt,
+        string calldata system,
+        bool chainOfThought,
+        uint256 minValue,
+        uint256 maxValue
+    ) external returns (uint256 score);
 }
 
 interface ILLMParseWebsiteAgent {
