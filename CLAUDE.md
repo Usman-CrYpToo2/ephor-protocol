@@ -11,14 +11,17 @@ forge install
 # Build
 forge build
 
-# Run all tests
+# Run all tests (summary only — saves ~3k tokens vs full output)
+forge test 2>&1 | grep -E "Suite result|^Ran|total tests|FAIL|Error"
+
+# Run all tests with full output (only when debugging a failure)
 forge test
 
 # Run a single test (add -vvv only when debugging a failure)
 forge test --match-test testName
 
 # Run a test contract
-forge test --match-contract VaultSentinelTest
+forge test --match-contract ContractName
 
 # Format
 forge fmt

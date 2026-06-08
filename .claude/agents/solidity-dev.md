@@ -47,19 +47,31 @@ Then read that section with offset/limit.
 
 **CRITICAL — file size rules (enforced, no exceptions):**
 
-**`test/VaultSentinelTest.t.sol` is 2679+ lines (~31k tokens). NEVER read it fully.**
-Always use this two-step approach:
-```bash
-# Step 1: find group boundaries and last line number
-grep -n "// ── GROUP\|// ══" test/VaultSentinelTest.t.sol | tail -10
-wc -l test/VaultSentinelTest.t.sol
-
-# Step 2: read only setUp (lines 1-80) + last GROUP section (last ~200 lines)
-# Use Read with offset/limit to target exactly what you need
+**The old monolith `test/VaultSentinelTest.t.sol` is DELETED. Tests are now split across:**
 ```
-Only read the full file if you have a specific compile error that requires understanding all imports.
+test/TestBase.sol                        (~150 lines, shared setUp)
+test/vault/VaultCoreTest.t.sol
+test/vault/VaultAllocationTest.t.sol
+test/vault/VaultFeeTest.t.sol
+test/vault/VaultAccessControlTest.t.sol
+test/vault/VaultMetricsTest.t.sol
+test/vault/VaultDefectsTest.t.sol
+test/vault/VaultReallocateTest.t.sol
+test/sentinel/SentinelSetupTest.t.sol
+test/sentinel/SentinelCheckVaultTest.t.sol
+test/sentinel/SentinelVerdictTest.t.sol
+test/sentinel/SentinelPrecedenceTest.t.sol
+test/sentinel/SentinelConsensusTest.t.sol
+test/oracle/OracleTest.t.sol
+test/integration/IntegrationTest.t.sol
+test/strategist/StrategistTest.t.sol
+```
+Always grep first to find which file contains a relevant test:
+```bash
+grep -rn "testName\|GROUP\|function test" test/ | grep -i "keyword"
+```
 
-**Source contracts (CuratedVault.sol ~37KB, VaultSentinel.sol ~39KB) — never read fully when you only need one function.**
+**Source contracts — never read fully when you only need one function.**
 ```bash
 grep -n "function functionName\|struct StructName\|error ErrorName" src/ContractName.sol
 # Then Read with offset/limit around those line numbers only
