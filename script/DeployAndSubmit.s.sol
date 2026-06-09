@@ -28,6 +28,8 @@ import "../src/Mock/MockUSDC.sol";
 import "../src/Mock/MockLendingMarket.sol";
 import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
+import {UtilizationOracle} from "../src/UtilizationOracle.sol";
+import {AllocationStrategist} from "../src/AllocationStrategist.sol";
 
 contract DeployAndSubmit is Script {
     // ── Somnia testnet platform (verified: docs.somnia.network/agents) ─────────
@@ -37,6 +39,12 @@ contract DeployAndSubmit is Script {
     bytes32 constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
     bytes32 constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
     bytes32 constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
+
+    // ── UtilizationOracle construction parameters ──────────────────────────────
+    uint256 constant TWAP_WINDOW          = 30 minutes; // matches UtilizationOracle default
+    uint256 constant SPIKE_THRESHOLD_BPS  = 500;        // 5% spike guard
+    uint256 constant CAUTION_UTIL_BPS     = 8000;       // conservative fallback (80%)
+    uint256 constant CRITICAL_UTIL_BPS    = 9500;       // secondary-rule threshold (95%)
 
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
@@ -83,14 +91,41 @@ contract DeployAndSubmit is Script {
         console.log("MockLendingMarket A:       ", address(marketA));
         console.log("MockLendingMarket B:       ", address(marketB));
 
-        // ── 6. Submit market additions via timelock ────────────────────────────
+        // ── 6. Deploy UtilizationOracle ───────────────────────────────────────
+        UtilizationOracle oracle = new UtilizationOracle(
+            TWAP_WINDOW,
+            SPIKE_THRESHOLD_BPS,
+            CAUTION_UTIL_BPS,
+            CRITICAL_UTIL_BPS,
+            deployer // owner / admin
+        );
+        console.log("UtilizationOracle deployed:", address(oracle));
+
+        // ── 7. Deploy AllocationStrategist (Tier-1 by default) ───────────────
+        AllocationStrategist strategist = new AllocationStrategist(
+            PLATFORM,
+            llmAgentId,
+            address(vault),
+            deployer // admin
+        );
+        console.log("AllocationStrategist deployed:", address(strategist));
+
+        // ── Grant ALLOCATOR_ROLE to strategist ────────────────────────────────
+        vault.grantRole(ALLOCATOR_ROLE, address(strategist));
+        console.log("ALLOCATOR_ROLE granted to strategist");
+
+        // ── Wire oracle into strategist ───────────────────────────────────────
+        strategist.setOracle(address(oracle));
+        console.log("Oracle wired into strategist");
+
+        // ── 8. Submit market additions via timelock ───────────────────────────
         // Timelock is 1 hour (MIN_TIMELOCK). Run ExecuteAndSeed.s.sol after that.
         vault.submitAddMarket(address(marketA), 50_000 * 1e6); // 50k USDC cap
         vault.submitAddMarket(address(marketB), 50_000 * 1e6);
         console.log("Market additions submitted to timelock queue");
         console.log("WAIT AT LEAST 1 MINUTE before running ExecuteAndSeed.s.sol");
 
-        // ── 7. Register vault in sentinel ─────────────────────────────────────
+        // ── 9. Register vault in sentinel ─────────────────────────────────────
         sentinel.registerVault(address(vault), true); // autoPause = true
         console.log("Vault registered in sentinel with autoPause=true");
 
@@ -103,6 +138,8 @@ contract DeployAndSubmit is Script {
         console.log("VAULT_SENTINEL_ADDRESS=", address(sentinel));
         console.log("MARKET_A_ADDRESS=", address(marketA));
         console.log("MARKET_B_ADDRESS=", address(marketB));
+        console.log("ORACLE_ADDRESS=", address(oracle));
+        console.log("STRATEGIST_ADDRESS=", address(strategist));
         console.log("==================================\n");
         console.log("NEXT STEP: wait 1 minute, then run ExecuteAndSeed.s.sol");
     }

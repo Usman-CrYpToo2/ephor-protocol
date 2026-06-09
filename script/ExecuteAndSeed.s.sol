@@ -26,6 +26,7 @@ import "../src/Mock/MockUSDC.sol";
 import "../src/Mock/MockLendingMarket.sol";
 import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
+import {UtilizationOracle} from "../src/UtilizationOracle.sol";
 
 contract ExecuteAndSeed is Script {
     function run() external {
@@ -59,7 +60,7 @@ contract ExecuteAndSeed is Script {
         console.log("Deposited 50,000 USDC into vault");
 
         // ── 4. Allocate to markets ─────────────────────────────────────────────
-        // Market A: 30,000 USDC (60% of vault assets — will trigger CRITICAL)
+        // Market A: 30,000 USDC (60% of vault assets - will trigger CRITICAL)
         // Market B: 10,000 USDC (20%)
         // Idle:      10,000 USDC (20%)
         vault.allocate(address(marketA), 30_000 * 1e6);
@@ -73,6 +74,24 @@ contract ExecuteAndSeed is Script {
         marketB.setUtilization(50);
         console.log("Market A utilization set to 96% (should trigger CRITICAL verdict)");
         console.log("Market B utilization set to 50% (safe)");
+
+        // ── 6. Seed oracle with initial observations ──────────────────────────
+        // NOTE: oracle.update() requires an IMarketAdapter registered per market
+        // via oracle.setAdapter(market, adapter).  MockLendingMarket does not
+        // implement IMarketAdapter (signature mismatch), so these calls are
+        // wrapped in try/catch.  On a production deployment with real adapters
+        // registered, both calls succeed and prime the TWAP accumulator.
+        UtilizationOracle oracle = UtilizationOracle(vm.envAddress("ORACLE_ADDRESS"));
+        try oracle.update(address(marketA)) {
+            console.log("Oracle seeded for Market A");
+        } catch {
+            console.log("Oracle seed skipped for Market A (no adapter registered - set via oracle.setAdapter)");
+        }
+        try oracle.update(address(marketB)) {
+            console.log("Oracle seeded for Market B");
+        } catch {
+            console.log("Oracle seed skipped for Market B (no adapter registered - set via oracle.setAdapter)");
+        }
 
         vm.stopBroadcast();
 
