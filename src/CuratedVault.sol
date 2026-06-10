@@ -5,6 +5,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ILendingMarket} from "./Interface/ILendingMarket.sol";
 
 /**
@@ -37,11 +38,6 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     uint256 private constant VSHARES = 1;
     uint256 private constant VASSETS = 1;
 
-    // Timelock bounds
-    uint256 public constant MIN_TIMELOCK = 1 minutes;
-    uint256 public constant MAX_TIMELOCK = 3 weeks;
-    uint256 public timelock = 1 minutes; // 1 min for testnet demo; 24h+ on mainnet
-
     // Fees
     uint256 public constant MAX_FEE_BPS = 2_000; // 20%
     uint256 public performanceFeeBps = 1_000; // 10%
@@ -56,13 +52,6 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     }
     mapping(address => MarketCfg) public markets;
     address[] private _mlist;
-
-    // Timelock queue
-    struct Pending {
-        uint256 eta;
-        bool exists;
-    }
-    mapping(bytes32 => Pending) public pendingActions;
 
     bool public depositsPaused;
     uint256 private _lastTA; // totalAssets snapshot for fee accrual
@@ -85,7 +74,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Maximum allowed drift from AI snapshot before staleness reject, in bps. Default 5%.
     uint256 public driftToleranceBps = 500;
     /// @notice Minimum time between rebalances. Default 1 hour.
-    uint256 public rebalanceEpochLength = 1 hours;
+    uint256 public rebalanceEpochLength = 1 minutes;
 
     // ── Phase 2: Epoch state ──────────────────────────────────────────────
     /// @notice Timestamp of the last successfully executed reallocate call.
@@ -103,7 +92,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Snapshot guard supplied by the caller to detect staleness.
     struct RebalanceGuard {
         uint256 snapshotTotalAssets; // totalAssets at time of AI request
-        uint256 snapshotEpoch;       // currentEpoch at time of AI request
+        uint256 snapshotEpoch; // currentEpoch at time of AI request
     }
 
     // ── Custom Errors ─────────────────────────────────────────────────
@@ -122,14 +111,10 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     event Redeemed(address indexed caller, address indexed rcv, address indexed owner, uint256 assets, uint256 shares);
     event Allocated(address indexed market, uint256 amount);
     event Deallocated(address indexed market, uint256 amount);
-    event MarketQueued(bytes32 indexed id, address indexed market, uint256 eta);
     event MarketEnabled(address indexed market, uint256 cap);
     event CapUpdated(address indexed market, uint256 cap);
-    event CapQueued(bytes32 indexed id, address indexed market, uint256 cap, uint256 eta);
-    event ActionRevoked(bytes32 indexed id);
     event DepositsToggled(bool paused, address by);
     event FeeMinted(address indexed to, uint256 shares, uint256 gain);
-    event TimelockUpdated(uint256 d);
     event FeeUpdated(uint256 bps);
     /// @dev Emitted when the minimum idle buffer floor is changed.
     event MinIdleBufferBpsSet(uint256 newBps);
@@ -343,7 +328,9 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         uint256 n = targets.length;
         for (uint256 i; i < n;) {
             targetSum += targets[i].targetAmount;
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // ── I-1 Conservation ─────────────────────────────────────────
@@ -397,7 +384,9 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
             // checked here for clarity and early revert.
             // (supply direction is always safe — vault holds idle assets)
 
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // ── I-6 Turnover bound ────────────────────────────────────────
@@ -417,7 +406,9 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
             if (cur > tgt) {
                 ILendingMarket(mkt).withdraw(cur - tgt);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // ── Interactions: Phase B — deposits ─────────────────────────
@@ -430,59 +421,30 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
                 require(asset.approve(mkt, toSupply), "approve failed");
                 ILendingMarket(mkt).supply(toSupply);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         emit Rebalanced(currentEpoch, totalAbsMovement);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  CURATOR – MARKET MANAGEMENT (timelocked)
+    //  CURATOR – MARKET MANAGEMENT
     // ═══════════════════════════════════════════════════════════════
 
-    function submitAddMarket(address market, uint256 cap) external onlyRole(CURATOR_ROLE) {
+    function addMarket(address market, uint256 cap) external onlyRole(CURATOR_ROLE) nonReentrant {
         require(market != address(0) && cap > 0, "bad args");
         require(!markets[market].enabled, "already enabled");
-        bytes32 id = keccak256(abi.encodePacked("addMarket", market, cap));
-        require(!pendingActions[id].exists, "already queued");
-        uint256 eta = block.timestamp + timelock;
-        pendingActions[id] = Pending(eta, true);
-        emit MarketQueued(id, market, eta);
-    }
-
-    function executeAddMarket(address market, uint256 cap) external nonReentrant {
-        bytes32 id = keccak256(abi.encodePacked("addMarket", market, cap));
-        Pending storage p = pendingActions[id];
-        require(p.exists, "no pending action");
-        require(block.timestamp >= p.eta, "timelock active");
         markets[market] = MarketCfg(true, cap);
         _mlist.push(market);
-        delete pendingActions[id];
         emit MarketEnabled(market, cap);
     }
 
     function setSupplyCap(address market, uint256 newCap) external {
         require(markets[market].enabled, "not enabled");
-        if (newCap > markets[market].supplyCap) {
-            require(hasRole(CURATOR_ROLE, msg.sender), "curator only");
-            bytes32 id = keccak256(abi.encodePacked("setCap", market, newCap));
-            require(!pendingActions[id].exists, "already queued");
-            uint256 eta = block.timestamp + timelock;
-            pendingActions[id] = Pending(eta, true);
-            emit CapQueued(id, market, newCap, eta);
-        } else {
-            require(hasRole(CURATOR_ROLE, msg.sender) || hasRole(SENTINEL_ROLE, msg.sender), "unauthorized");
-            markets[market].supplyCap = newCap;
-            emit CapUpdated(market, newCap);
-        }
-    }
-
-    function executeSetCap(address market, uint256 newCap) external nonReentrant {
-        bytes32 id = keccak256(abi.encodePacked("setCap", market, newCap));
-        Pending storage p = pendingActions[id];
-        require(p.exists && block.timestamp >= p.eta, "timelock active");
+        require(hasRole(CURATOR_ROLE, msg.sender) || hasRole(SENTINEL_ROLE, msg.sender), "unauthorized");
         markets[market].supplyCap = newCap;
-        delete pendingActions[id];
         emit CapUpdated(market, newCap);
     }
 
@@ -495,7 +457,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         emit DepositsToggled(true, msg.sender);
     }
 
-    function unpauseDeposits() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function unpauseDeposits() external {
         depositsPaused = false;
         emit DepositsToggled(false, msg.sender);
     }
@@ -504,13 +466,6 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         require(markets[market].enabled, "market disabled");
         ILendingMarket(market).withdraw(amount);
         emit Deallocated(market, amount);
-    }
-
-    function revokeAction(bytes32 id) external {
-        require(hasRole(SENTINEL_ROLE, msg.sender) || hasRole(CURATOR_ROLE, msg.sender), "unauthorized");
-        require(pendingActions[id].exists, "no action");
-        delete pendingActions[id];
-        emit ActionRevoked(id);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -561,12 +516,6 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         emit RebalanceEpochLengthSet(d);
     }
 
-    function setTimelock(uint256 d) external onlyRole(CURATOR_ROLE) {
-        require(d >= MIN_TIMELOCK && d <= MAX_TIMELOCK, "bad delay");
-        timelock = d;
-        emit TimelockUpdated(d);
-    }
-
     function setPerformanceFee(uint256 bps) external onlyRole(CURATOR_ROLE) {
         require(bps <= MAX_FEE_BPS, "fee too high");
         _accruePerformanceFee();
@@ -613,10 +562,20 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         return _mlist[i];
     }
 
+    /// @notice Decimal count of the vault's configured asset (read from the asset ERC-20).
+    function assetDecimals() external view returns (uint8) {
+        return IERC20Metadata(address(asset)).decimals();
+    }
+
+    /// @notice Supply cap for a market in asset base units. Returns 0 for unregistered markets.
+    function marketSupplyCap(address market) external view returns (uint256) {
+        return markets[market].supplyCap;
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  INTERNAL
     // ═══════════════════════════════════════════════════════════════
-
+    // @audit must use muldiv rather than the native solidity operation may result in overflow
     function _toShares(uint256 a) internal view returns (uint256) {
         return a * (totalSupply() + VSHARES) / (totalAssets() + VASSETS);
     }
@@ -652,7 +611,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
             _lastTA = cur;
             return;
         }
-        uint256 gain = cur - _lastTA;
+        uint256 gain = cur - _lastTA; // 10 usdc  10 * 10 / 100 = 1
         uint256 feeA = gain * performanceFeeBps / 10_000;
         uint256 feeShares = feeA * (totalSupply() + VSHARES) / (cur + VASSETS);
         if (feeShares > 0) _mint(feeRecipient, feeShares);
@@ -660,3 +619,6 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         _lastTA = cur;
     }
 }
+
+// -------- 5 usdt
+

@@ -56,6 +56,17 @@ contract ReplaceSentinel is Script {
         newSentinel.registerVault(vaultAddr, true);
         console.log("Vault registered in new sentinel (autoPause=true)");
 
+        // 5. Wire oracle if set in .env (no-op when ORACLE_ADDRESS is not set — testnet-safe)
+        // Testnet caveat: oracle.isValid() returns false until IMarketAdapter is registered
+        // per market. With MockLendingMarket, sentinel falls back to ORACLE_CAUTION_UTIL_BPS.
+        address oracleAddr = vm.envOr("ORACLE_ADDRESS", address(0));
+        if (oracleAddr != address(0)) {
+            newSentinel.setOracle(oracleAddr);
+            console.log("Oracle wired into new sentinel:", oracleAddr);
+        } else {
+            console.log("ORACLE_ADDRESS not set -- sentinel reads raw spot util (testnet-safe)");
+        }
+
         vm.stopBroadcast();
 
         console.log("\n========= UPDATE YOUR .env =========");

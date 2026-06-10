@@ -11,6 +11,12 @@ interface IVault {
     function marketAllocationBps(address market) external view returns (uint256);
     function marketCount() external view returns (uint256);
     function marketList(uint256 i) external view returns (address);
+    /// @dev Supply cap for a market in asset base units (§9.3 headroom field).
+    function marketSupplyCap(address market) external view returns (uint256);
+    /// @dev Current rebalance epoch — changes after each executed rebalance (§9.3).
+    function currentEpoch() external view returns (uint256);
+    /// @dev Decimal count of the vault's configured ERC-20 asset (§9.3 decimals field).
+    function assetDecimals() external view returns (uint8);
     function pauseDeposits() external;
     function emergencyDeallocate(address market, uint256 amount) external;
 }

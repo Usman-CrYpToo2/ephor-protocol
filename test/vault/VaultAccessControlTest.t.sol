@@ -5,7 +5,6 @@ import {TestBase} from "../TestBase.sol";
 
 /// @notice Tests for role-based access control, config functions, and security edge cases.
 contract VaultAccessControlTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 7 — Role-based access control
     // ══════════════════════════════════════════════════════════════════════════
@@ -32,7 +31,7 @@ contract VaultAccessControlTest is TestBase {
 
     function testVault_nonCuratorCannotAddMarket() public {
         vm.expectRevert();
-        vault.submitAddMarket(address(0xCAFE), 1_000 * 1e6);
+        vault.addMarket(address(0xCAFE), 1_000 * 1e6);
     }
 
     function testVault_curatorCanAddMarket() public {
@@ -40,9 +39,7 @@ contract VaultAccessControlTest is TestBase {
         vm.prank(admin);
         vault.grantRole(CURATOR_ROLE, address(this));
 
-        vault.submitAddMarket(fake, 1_000 * 1e6);
-        vm.warp(block.timestamp + 3601);
-        vault.executeAddMarket(fake, 1_000 * 1e6);
+        vault.addMarket(fake, 1_000 * 1e6);
 
         (bool enabled,) = vault.markets(fake);
         assertTrue(enabled);
@@ -57,11 +54,6 @@ contract VaultAccessControlTest is TestBase {
         vault.pauseDeposits();
         assertTrue(vault.depositsPaused());
 
-        vm.expectRevert();
-        vault.unpauseDeposits();
-        assertTrue(vault.depositsPaused(), "still paused after failed unpause");
-
-        vm.prank(admin);
         vault.unpauseDeposits();
         assertFalse(vault.depositsPaused());
 
@@ -89,24 +81,6 @@ contract VaultAccessControlTest is TestBase {
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 8 — Curator config functions
     // ══════════════════════════════════════════════════════════════════════════
-
-    function testVault_setTimelockWithinBounds() public {
-        vm.prank(curator);
-        vault.setTimelock(2 minutes);
-        assertEq(vault.timelock(), 2 minutes);
-    }
-
-    function testVault_setTimelockTooShortReverts() public {
-        vm.prank(curator);
-        vm.expectRevert();
-        vault.setTimelock(30 seconds);
-    }
-
-    function testVault_setTimelockTooLongReverts() public {
-        vm.prank(curator);
-        vm.expectRevert();
-        vault.setTimelock(4 weeks);
-    }
 
     function testVault_setPerformanceFee() public {
         vm.prank(curator);

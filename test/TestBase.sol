@@ -22,7 +22,7 @@ import "../src/Interface/ISomnia.sol";
  *  protocol environment: USDC → CuratedVault → two markets → VaultSentinel → registered.
  *
  *  ── Root-cause notes for previous failures ────────────────────────────────
- *  1. setUp called vault.grantRole / vault.submitAddMarket / sentinel.registerVault
+ *  1. setUp called vault.grantRole / vault.addMarket / sentinel.registerVault
  *     without vm.prank — the test contract has no vault roles.  Fixed by adding
  *     vm.prank(admin) / vm.prank(curator) around every privileged call.
  *  2. Many tests called vault.allocate without ALLOCATOR_ROLE.  Fixed with
@@ -45,23 +45,23 @@ abstract contract TestBase is Test {
     MockSomniaPlatform platform;
 
     // ── Actors ─────────────────────────────────────────────────────────────
-    address admin     = address(0x1111); // DEFAULT_ADMIN_ROLE on vault + sentinel owner
-    address curator   = address(0x2222); // CURATOR_ROLE on vault
+    address admin = address(0x1111); // DEFAULT_ADMIN_ROLE on vault + sentinel owner
+    address curator = address(0x2222); // CURATOR_ROLE on vault
     address allocator = address(0x3333); // ALLOCATOR_ROLE on vault
-    address user1     = address(0x4444);
-    address user2     = address(0x5555);
-    address attacker  = address(0x6666);
+    address user1 = address(0x4444);
+    address user2 = address(0x5555);
+    address attacker = address(0x6666);
 
     // ── Role constants ─────────────────────────────────────────────────────
-    bytes32 constant CURATOR_ROLE   = keccak256("CURATOR_ROLE");
+    bytes32 constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
     bytes32 constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
-    bytes32 constant SENTINEL_ROLE  = keccak256("SENTINEL_ROLE");
-    bytes32 constant ADMIN_ROLE     = bytes32(0);
+    bytes32 constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
+    bytes32 constant ADMIN_ROLE = bytes32(0);
 
     // ── Sentinel constants mirrored for tests ──────────────────────────────
-    uint256 constant CHECK_COOLDOWN     = 5 minutes;
+    uint256 constant CHECK_COOLDOWN = 5 minutes;
     uint256 constant LLM_COST_PER_AGENT = 0.07 ether;
-    uint256 constant SUBCOMMITTEE_SIZE  = 3;
+    uint256 constant SUBCOMMITTEE_SIZE = 3;
 
     // Minimum msg.value for checkVault.
     // = getRequestDeposit() + LLM_COST_PER_AGENT × SUBCOMMITTEE_SIZE
@@ -124,18 +124,16 @@ abstract contract TestBase is Test {
         marketA = new MockLendingMarket(address(usdc), address(vault), "Market A");
         marketB = new MockLendingMarket(address(usdc), address(vault), "Market B");
 
-        // 7. Add markets via curator timelock
+        // 7. Add markets (instant, no timelock)
         vm.startPrank(curator);
-        vault.submitAddMarket(address(marketA), 50_000 * 1e6);
-        vault.submitAddMarket(address(marketB), 50_000 * 1e6);
+        vault.addMarket(address(marketA), 50_000 * 1e6);
+        vault.addMarket(address(marketB), 50_000 * 1e6);
         vm.stopPrank();
 
-        vm.warp(block.timestamp + 3601);
+        // 8. Advance time so sentinel cooldown, rebalance epoch, and mock timeout math (block.timestamp - 120) work correctly
+        vm.warp(block.timestamp + 200);
 
-        vault.executeAddMarket(address(marketA), 50_000 * 1e6);
-        vault.executeAddMarket(address(marketB), 50_000 * 1e6);
-
-        // 8. Register vault in sentinel (autoPause enabled)
+        // 9. Register vault in sentinel (autoPause enabled)
         vm.prank(admin);
         sentinel.registerVault(address(vault), true);
 

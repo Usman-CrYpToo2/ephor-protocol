@@ -5,7 +5,6 @@ import {TestBase} from "../TestBase.sol";
 
 /// @notice Tests for the performance fee mechanism.
 contract VaultFeeTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 6 — Performance fee
     // ══════════════════════════════════════════════════════════════════════════

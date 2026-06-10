@@ -54,14 +54,18 @@ library AllocationProjection {
         for (uint256 i; i < n;) {
             uint256 mktCap = maxMktBps * totalAssets_ / 10_000;
             ceilings[i] = supplyCaps[i] < mktCap ? supplyCaps[i] : mktCap;
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // ── Step 3: Weight sum + proportional split ───────────────────────
         uint256 wSum;
         for (uint256 i; i < n;) {
             wSum += weights[i];
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         uint256[] memory proportional = new uint256[](n);
@@ -71,7 +75,9 @@ library AllocationProjection {
         }
         for (uint256 i; i < n;) {
             proportional[i] = weights[i] * budget / wSum;
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // ── Step 4: Capped water-fill ─────────────────────────────────────
@@ -79,7 +85,9 @@ library AllocationProjection {
         // We run at most n passes (each pass caps at least one newly-overflowing entry).
         for (uint256 i; i < n;) {
             targets[i] = proportional[i];
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         bool changed = true;
@@ -95,7 +103,9 @@ library AllocationProjection {
                 } else {
                     uncappedSum += targets[i];
                 }
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
             }
             if (overflow == 0) break;
             // Redistribute overflow proportionally to uncapped slots.
@@ -105,7 +115,9 @@ library AllocationProjection {
                     uint256 share = targets[i] * overflow / uncappedSum;
                     targets[i] += share;
                 }
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
             }
         }
 
@@ -117,7 +129,9 @@ library AllocationProjection {
             uint256 b = currentBals[i];
             uint256 t = targets[i];
             totalDelta += t > b ? t - b : b - t;
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         if (totalDelta > maxTurn && totalDelta > 0) {
             // Scale all targets back toward current balances by ratio maxTurn/totalDelta.
@@ -130,7 +144,9 @@ library AllocationProjection {
                 } else {
                     targets[i] = b - (b - t) * maxTurn / totalDelta;
                 }
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
             }
         }
 

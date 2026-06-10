@@ -3,114 +3,185 @@ pragma solidity ^0.8.20;
 
 /**
  * @title  ExecuteAndSeed
- * @notice Step 2 of 3 for testnet deployment.
+ * @notice Step 2 of 2 — Seeds all three vaults with initial deposits,
+ *         allocations, demo utilization, and supply rates.
  *
- *         Run this AT LEAST 1 MINUTE after DeployAndSubmit.s.sol.
- *         Executes the timelocked market additions, mints USDC, deposits into
- *         the vault, allocates to both markets, and sets demo utilization so
- *         the AI sentinel has something meaningful to evaluate.
+ *  Run immediately after DeployAndSubmit.s.sol (no timelock to wait for).
  *
- *  Run:
  *    source .env
  *    forge script script/ExecuteAndSeed.s.sol \
- *      --rpc-url $SOMNIA_TESTNET_RPC \
+ *      --rpc-url somnia_testnet \
  *      --broadcast \
  *      --private-key $PRIVATE_KEY \
- *      -vvvv
+ *      --gas-estimate-multiplier 3000
  *
- *  STT required: ~0.05 STT for gas.
+ *  Requires the following .env vars to be set from Step 1 output:
+ *    USDC_VAULT_ADDRESS, WETH_VAULT_ADDRESS, WBTC_VAULT_ADDRESS
+ *    MOCK_USDC_ADDRESS, MOCK_WETH_ADDRESS, MOCK_WBTC_ADDRESS
+ *    USDC_MARKET_A_ADDRESS, USDC_MARKET_B_ADDRESS
+ *    WETH_MARKET_A_ADDRESS, WETH_MARKET_B_ADDRESS
+ *    WBTC_MARKET_A_ADDRESS, WBTC_MARKET_B_ADDRESS
+ *    VAULT_SENTINEL_ADDRESS, USDC_STRATEGIST_ADDRESS
  */
 
 import {Script, console} from "forge-std/Script.sol";
+import "../src/Mock/MockERC20.sol";
 import "../src/Mock/MockUSDC.sol";
 import "../src/Mock/MockLendingMarket.sol";
 import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
-import {UtilizationOracle} from "../src/UtilizationOracle.sol";
+import {AllocationStrategist} from "../src/AllocationStrategist.sol";
 
 contract ExecuteAndSeed is Script {
+    bytes32 constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
+
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.envAddress("DEPLOYER_ADDRESS");
 
+        // ── USDC vault ────────────────────────────────────────────────────────
         address usdcAddr = vm.envAddress("MOCK_USDC_ADDRESS");
-        address vaultAddr = vm.envAddress("CURATED_VAULT_ADDRESS");
-        address marketAAddr = vm.envAddress("MARKET_A_ADDRESS");
-        address marketBAddr = vm.envAddress("MARKET_B_ADDRESS");
+        address usdcVaultAddr = vm.envAddress("USDC_VAULT_ADDRESS");
+        address usdcMarketA = vm.envAddress("USDC_MARKET_A_ADDRESS");
+        address usdcMarketB = vm.envAddress("USDC_MARKET_B_ADDRESS");
+        address usdcStratAddr = vm.envAddress("USDC_STRATEGIST_ADDRESS");
 
+        // ── WETH vault ────────────────────────────────────────────────────────
+        address wethAddr = vm.envAddress("MOCK_WETH_ADDRESS");
+        address wethVaultAddr = vm.envAddress("WETH_VAULT_ADDRESS");
+        address wethMarketA = vm.envAddress("WETH_MARKET_A_ADDRESS");
+        address wethMarketB = vm.envAddress("WETH_MARKET_B_ADDRESS");
+
+        // ── WBTC vault ────────────────────────────────────────────────────────
+        address wbtcAddr = vm.envAddress("MOCK_WBTC_ADDRESS");
+        address wbtcVaultAddr = vm.envAddress("WBTC_VAULT_ADDRESS");
+        address wbtcMarketA = vm.envAddress("WBTC_MARKET_A_ADDRESS");
+        address wbtcMarketB = vm.envAddress("WBTC_MARKET_B_ADDRESS");
+
+        // ── Cast to contract types ─────────────────────────────────────────────
         MockUSDC usdc = MockUSDC(usdcAddr);
-        CuratedVault vault = CuratedVault(vaultAddr);
-        MockLendingMarket marketA = MockLendingMarket(marketAAddr);
-        MockLendingMarket marketB = MockLendingMarket(marketBAddr);
+        MockERC20 weth = MockERC20(wethAddr);
+        MockERC20 wbtc = MockERC20(wbtcAddr);
+
+        CuratedVault vaultUSDC = CuratedVault(usdcVaultAddr);
+        CuratedVault vaultWETH = CuratedVault(wethVaultAddr);
+        CuratedVault vaultWBTC = CuratedVault(wbtcVaultAddr);
+
+        MockLendingMarket mktUsdcA = MockLendingMarket(usdcMarketA);
+        MockLendingMarket mktUsdcB = MockLendingMarket(usdcMarketB);
+        MockLendingMarket mktWethA = MockLendingMarket(wethMarketA);
+        MockLendingMarket mktWethB = MockLendingMarket(wethMarketB);
+        MockLendingMarket mktWbtcA = MockLendingMarket(wbtcMarketA);
+        MockLendingMarket mktWbtcB = MockLendingMarket(wbtcMarketB);
 
         vm.startBroadcast(deployerKey);
 
-        // ── 1. Execute timelocked market additions ─────────────────────────────
-        vault.executeAddMarket(address(marketA), 50_000 * 1e6);
-        vault.executeAddMarket(address(marketB), 50_000 * 1e6);
-        console.log("Markets added to vault");
+        // ══════════════════════════════════════════════════════════════════════
+        // USDC VAULT — seed
+        // ══════════════════════════════════════════════════════════════════════
 
-        // ── 2. Mint test USDC to deployer ──────────────────────────────────────
-        usdc.mint(deployer, 100_000 * 1e6); // 100k USDC (6 decimals)
-        console.log("Minted 100,000 USDC to deployer");
+        usdc.mint(deployer, 200_000 * 1e6); // 200k USDC
+        usdc.approve(usdcVaultAddr, 100_000 * 1e6);
+        vaultUSDC.deposit(100_000 * 1e6, deployer); // deposit 100k
+        vaultUSDC.allocate(usdcMarketA, 30_000 * 1e6); // 30k to A (30%)
+        vaultUSDC.allocate(usdcMarketB, 20_000 * 1e6); // 20k to B (20%)
+        // 50k idle (50%)
 
-        // ── 3. Deposit into vault ──────────────────────────────────────────────
-        usdc.approve(address(vault), 50_000 * 1e6);
-        vault.deposit(50_000 * 1e6, deployer);
-        console.log("Deposited 50,000 USDC into vault");
+        // Demo utilization + supply rates
+        mktUsdcA.setUtilization(45); // 45% — safe, moderate yield
+        mktUsdcB.setUtilization(72); // 72% — approaching caution
+        mktUsdcA.setSupplyRate(300); // 3.0% APY
+        mktUsdcB.setSupplyRate(520); // 5.2% APY
 
-        // ── 4. Allocate to markets ─────────────────────────────────────────────
-        // Market A: 30,000 USDC (60% of vault assets - will trigger CRITICAL)
-        // Market B: 10,000 USDC (20%)
-        // Idle:      10,000 USDC (20%)
-        vault.allocate(address(marketA), 30_000 * 1e6);
-        vault.allocate(address(marketB), 10_000 * 1e6);
-        console.log("Allocated: 30k to Market A, 10k to Market B");
+        console.log("USDC vault seeded: 100k deposited, 30k+20k allocated");
+        console.log("  Market A: util=45%, APY=3.0%");
+        console.log("  Market B: util=72%, APY=5.2%");
 
-        // ── 5. Set demo utilization ────────────────────────────────────────────
-        // Market A: 96% utilization (>95% = CRITICAL per system prompt)
-        // Market B: 50% utilization (safe)
-        marketA.setUtilization(96);
-        marketB.setUtilization(50);
-        console.log("Market A utilization set to 96% (should trigger CRITICAL verdict)");
-        console.log("Market B utilization set to 50% (safe)");
+        // ══════════════════════════════════════════════════════════════════════
+        // WETH VAULT — seed
+        // ══════════════════════════════════════════════════════════════════════
 
-        // ── 6. Seed oracle with initial observations ──────────────────────────
-        // NOTE: oracle.update() requires an IMarketAdapter registered per market
-        // via oracle.setAdapter(market, adapter).  MockLendingMarket does not
-        // implement IMarketAdapter (signature mismatch), so these calls are
-        // wrapped in try/catch.  On a production deployment with real adapters
-        // registered, both calls succeed and prime the TWAP accumulator.
-        UtilizationOracle oracle = UtilizationOracle(vm.envAddress("ORACLE_ADDRESS"));
-        try oracle.update(address(marketA)) {
-            console.log("Oracle seeded for Market A");
-        } catch {
-            console.log("Oracle seed skipped for Market A (no adapter registered - set via oracle.setAdapter)");
-        }
-        try oracle.update(address(marketB)) {
-            console.log("Oracle seeded for Market B");
-        } catch {
-            console.log("Oracle seed skipped for Market B (no adapter registered - set via oracle.setAdapter)");
-        }
+        weth.mint(deployer, 200 * 1e18); // 200 WETH
+        weth.approve(wethVaultAddr, 100 * 1e18);
+        vaultWETH.deposit(100 * 1e18, deployer); // deposit 100 WETH
+        vaultWETH.allocate(wethMarketA, 30 * 1e18); // 30 WETH to A
+        vaultWETH.allocate(wethMarketB, 20 * 1e18); // 20 WETH to B
+
+        mktWethA.setUtilization(55); // 55%
+        mktWethB.setUtilization(68); // 68%
+        mktWethA.setSupplyRate(380); // 3.8% APY
+        mktWethB.setSupplyRate(510); // 5.1% APY
+
+        console.log("WETH vault seeded: 100 WETH deposited, 30+20 allocated");
+        console.log("  Market A: util=55%, APY=3.8%");
+        console.log("  Market B: util=68%, APY=5.1%");
+
+        // ══════════════════════════════════════════════════════════════════════
+        // WBTC VAULT — seed
+        // ══════════════════════════════════════════════════════════════════════
+
+        wbtc.mint(deployer, 20 * 1e8); // 20 WBTC (8 dec)
+        wbtc.approve(wbtcVaultAddr, 10 * 1e8);
+        vaultWBTC.deposit(10 * 1e8, deployer); // deposit 10 WBTC
+        vaultWBTC.allocate(wbtcMarketA, 3 * 1e8); // 3 WBTC to A
+        vaultWBTC.allocate(wbtcMarketB, 2 * 1e8); // 2 WBTC to B
+
+        mktWbtcA.setUtilization(40); // 40%
+        mktWbtcB.setUtilization(62); // 62%
+        mktWbtcA.setSupplyRate(280); // 2.8% APY
+        mktWbtcB.setSupplyRate(450); // 4.5% APY
+
+        console.log("WBTC vault seeded: 10 WBTC deposited, 3+2 allocated");
+        console.log("  Market A: util=40%, APY=2.8%");
+        console.log("  Market B: util=62%, APY=4.5%");
 
         vm.stopBroadcast();
 
-        // ── Verify expected state ──────────────────────────────────────────────
-        uint256 totalAssets = vault.totalAssets();
-        uint256 idlePct = vault.idleBufferBps();
-        uint256 mktAPct = vault.marketAllocationBps(address(marketA));
-        uint256 mktBPct = vault.marketAllocationBps(address(marketB));
-        uint256 mktAUtil = marketA.utilizationBps();
-        uint256 mktBUtil = marketB.utilizationBps();
+        // ── Verification printout ─────────────────────────────────────────────
+        console.log("\n====================================================");
+        console.log("VAULT STATE AFTER SEED");
+        console.log("====================================================");
 
-        console.log("\n========= VAULT STATE =========");
-        console.log("totalAssets (USDC units):  ", totalAssets / 1e6);
-        console.log("idleBufferBps:             ", idlePct, "bps");
-        console.log("Market A allocation:       ", mktAPct, "%  (CRITICAL threshold: >40%)");
-        console.log("Market B allocation:       ", mktBPct, "%");
-        console.log("Market A utilization (bps):", mktAUtil, " (CRITICAL threshold: >9500)");
-        console.log("Market B utilization (bps):", mktBUtil);
-        console.log("================================");
-        console.log("\nNEXT STEP: run TriggerCheck.s.sol (requires 0.25 STT)");
+        console.log("\n[ USDC Vault ]");
+        console.log("  totalAssets (USDC):  ", vaultUSDC.totalAssets() / 1e6);
+        console.log("  idle buffer (bps):   ", vaultUSDC.idleBufferBps());
+        console.log("  alloc A (bps):       ", vaultUSDC.marketAllocationBps(usdcMarketA));
+        console.log("  alloc B (bps):       ", vaultUSDC.marketAllocationBps(usdcMarketB));
+        console.log("  share price:         ", vaultUSDC.sharePrice());
+        console.log("  epoch:               ", vaultUSDC.currentEpoch());
+
+        console.log("\n[ WETH Vault ]");
+        console.log("  totalAssets (wei):   ", vaultWETH.totalAssets());
+        console.log("  idle buffer (bps):   ", vaultWETH.idleBufferBps());
+        console.log("  alloc A (bps):       ", vaultWETH.marketAllocationBps(wethMarketA));
+        console.log("  alloc B (bps):       ", vaultWETH.marketAllocationBps(wethMarketB));
+
+        console.log("\n[ WBTC Vault ]");
+        console.log("  totalAssets (sat):   ", vaultWBTC.totalAssets());
+        console.log("  idle buffer (bps):   ", vaultWBTC.idleBufferBps());
+        console.log("  alloc A (bps):       ", vaultWBTC.marketAllocationBps(wbtcMarketA));
+        console.log("  alloc B (bps):       ", vaultWBTC.marketAllocationBps(wbtcMarketB));
+
+        // Verify strategist wiring
+        address usdcStrat = vm.envOr("USDC_STRATEGIST_ADDRESS", address(0));
+        if (usdcStrat != address(0)) {
+            console.log("\n[ Strategist wiring ]");
+            console.log("  USDC strategist has ALLOCATOR_ROLE:", vaultUSDC.hasRole(ALLOCATOR_ROLE, usdcStrat));
+        }
+
+        console.log("\n====================================================");
+        console.log("DEPLOYMENT COMPLETE");
+        console.log("====================================================");
+        console.log("");
+        console.log("Next steps:");
+        console.log("  1. Update frontend/src/config.js VAULTS array with new addresses");
+        console.log("  2. Trigger AI risk check:");
+        console.log("     cast send $VAULT_SENTINEL_ADDRESS 'checkVault(address)'");
+        console.log("       $USDC_VAULT_ADDRESS --value 0.25ether");
+        console.log("       --rpc-url $SOMNIA_TESTNET_RPC --private-key $PRIVATE_KEY");
+        console.log("  3. Trigger AI rebalance:");
+        console.log("     cast send $USDC_STRATEGIST_ADDRESS 'requestRebalance(address)'");
+        console.log("       $USDC_VAULT_ADDRESS --value 0.5ether");
+        console.log("       --rpc-url $SOMNIA_TESTNET_RPC --private-key $PRIVATE_KEY");
     }
 }

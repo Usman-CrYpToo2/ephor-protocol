@@ -8,4 +8,6 @@ interface ILendingMarket {
     function withdraw(uint256 amount) external;
     function balanceOf(address account) external view returns (uint256);
     function utilizationBps() external view returns (uint256);
+    /// @notice Current supply APY in basis points. Returns 0 if unsupported.
+    function supplyRateBps() external view returns (uint256);
 }

@@ -3,28 +3,35 @@ pragma solidity ^0.8.20;
 
 /**
  * @title  DeployAndSubmit
- * @notice Step 1 of 3 for testnet deployment.
+ * @notice Step 1 of 2 — Deploys the full Ephor Protocol with 3 vaults.
  *
- *         Deploys all contracts and submits the timelock market additions.
- *         CuratedVault enforces a 1-minute timelock on market additions (testnet demo),
- *         so ExecuteAndSeed.s.sol must be run at least 1 minute after this script.
+ *  VAULTS DEPLOYED
+ *  ───────────────
+ *  • Ephor USDC Vault  (MockUSDC, 6 decimals)
+ *  • Ephor WETH Vault  (MockWETH, 18 decimals)
+ *  • Ephor WBTC Vault  (MockWBTC, 8 decimals)
+ *
+ *  SHARED INFRASTRUCTURE
+ *  ──────────────────────
+ *  • 1 × VaultSentinel         (multi-vault, all 3 registered)
+ *  • 1 × UtilizationOracle     (shared)
+ *  • 3 × AllocationStrategist  (one per vault — immutable vault ref)
+ *  • 6 × MockLendingMarket     (2 per vault)
  *
  *  Run:
  *    source .env
  *    forge script script/DeployAndSubmit.s.sol \
- *      --rpc-url $SOMNIA_TESTNET_RPC \
+ *      --rpc-url somnia_testnet \
  *      --broadcast \
  *      --private-key $PRIVATE_KEY \
- *      -vvvv
+ *      --gas-estimate-multiplier 3000
  *
- *  After running, copy the printed addresses into .env before running Step 2.
- *
- *  STT required: ~0.1 STT for gas (deployment costs).
- *  Get testnet STT from: https://testnet.somnia.network/
+ *  Copy the printed addresses into .env, then run ExecuteAndSeed.s.sol.
  */
 
 import {Script, console} from "forge-std/Script.sol";
 import "../src/Mock/MockUSDC.sol";
+import "../src/Mock/MockERC20.sol";
 import "../src/Mock/MockLendingMarket.sol";
 import "../src/CuratedVault.sol";
 import "../src/VaultSentinel.sol";
@@ -32,115 +39,183 @@ import {UtilizationOracle} from "../src/UtilizationOracle.sol";
 import {AllocationStrategist} from "../src/AllocationStrategist.sol";
 
 contract DeployAndSubmit is Script {
-    // ── Somnia testnet platform (verified: docs.somnia.network/agents) ─────────
     address constant PLATFORM = 0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776;
 
-    // ── Role constants ─────────────────────────────────────────────────────────
     bytes32 constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
     bytes32 constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
     bytes32 constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
 
-    // ── UtilizationOracle construction parameters ──────────────────────────────
-    uint256 constant TWAP_WINDOW          = 30 minutes; // matches UtilizationOracle default
-    uint256 constant SPIKE_THRESHOLD_BPS  = 500;        // 5% spike guard
-    uint256 constant CAUTION_UTIL_BPS     = 8000;       // conservative fallback (80%)
-    uint256 constant CRITICAL_UTIL_BPS    = 9500;       // secondary-rule threshold (95%)
+    uint256 constant TWAP_WINDOW = 30 minutes;
+    uint256 constant SPIKE_THRESHOLD_BPS = 500;
+    uint256 constant CAUTION_UTIL_BPS = 8000;
+    uint256 constant CRITICAL_UTIL_BPS = 9500;
 
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.envAddress("DEPLOYER_ADDRESS");
         uint256 llmAgentId = vm.envUint("LLM_AGENT_ID");
 
-        require(llmAgentId != 0, "LLM_AGENT_ID not set in .env - visit agents.testnet.somnia.network");
+        require(llmAgentId != 0, "LLM_AGENT_ID not set in .env");
 
         vm.startBroadcast(deployerKey);
 
-        // ── 1. Mock USDC (6 decimals, open-mint on testnet) ───────────────────
-        MockUSDC usdc = new MockUSDC();
-        console.log("MockUSDC deployed:         ", address(usdc));
+        // ══════════════════════════════════════════════════════════════════════
+        // 1. Mock ERC-20 tokens
+        // ══════════════════════════════════════════════════════════════════════
 
-        // ── 2. CuratedVault ────────────────────────────────────────────────────
-        // Deployer holds all roles so the script is self-contained.
-        // In production, replace with a DAO multisig and separate role holders.
-        CuratedVault vault = new CuratedVault(
-            address(usdc),
-            "Ephor Protocol vsUSDC",
-            "vsUSDC",
-            deployer, // admin
-            deployer, // curator
-            deployer, // allocator
-            deployer // feeRecipient
-        );
-        console.log("CuratedVault deployed:     ", address(vault));
+        MockUSDC usdc = new MockUSDC(); // 6 dec
+        MockERC20 weth = new MockERC20("Mock Wrapped Ether", "WETH", 18); // 18 dec
+        MockERC20 wbtc = new MockERC20("Mock Wrapped Bitcoin", "WBTC", 8); //  8 dec
 
-        // ── 3. VaultSentinel ───────────────────────────────────────────────────
-        VaultSentinel sentinel = new VaultSentinel(
-            PLATFORM,
-            llmAgentId,
-            deployer // sentinel admin
-        );
-        console.log("VaultSentinel deployed:    ", address(sentinel));
+        console.log("MockUSDC deployed:  ", address(usdc));
+        console.log("MockWETH deployed:  ", address(weth));
+        console.log("MockWBTC deployed:  ", address(wbtc));
 
-        // ── 4. Grant SENTINEL_ROLE to VaultSentinel ────────────────────────────
-        vault.grantRole(SENTINEL_ROLE, address(sentinel));
-        console.log("SENTINEL_ROLE granted to sentinel");
+        // ══════════════════════════════════════════════════════════════════════
+        // 2. CuratedVaults (one per asset)
+        // ══════════════════════════════════════════════════════════════════════
 
-        // ── 5. Deploy two mock lending markets ────────────────────────────────
-        MockLendingMarket marketA = new MockLendingMarket(address(usdc), address(vault), "Ephor Market A");
-        MockLendingMarket marketB = new MockLendingMarket(address(usdc), address(vault), "Ephor Market B");
-        console.log("MockLendingMarket A:       ", address(marketA));
-        console.log("MockLendingMarket B:       ", address(marketB));
+        CuratedVault vaultUSDC =
+            new CuratedVault(address(usdc), "Ephor USDC Vault", "ephUSDC", deployer, deployer, deployer, deployer);
+        CuratedVault vaultWETH =
+            new CuratedVault(address(weth), "Ephor WETH Vault", "ephWETH", deployer, deployer, deployer, deployer);
+        CuratedVault vaultWBTC =
+            new CuratedVault(address(wbtc), "Ephor WBTC Vault", "ephWBTC", deployer, deployer, deployer, deployer);
 
-        // ── 6. Deploy UtilizationOracle ───────────────────────────────────────
-        UtilizationOracle oracle = new UtilizationOracle(
-            TWAP_WINDOW,
-            SPIKE_THRESHOLD_BPS,
-            CAUTION_UTIL_BPS,
-            CRITICAL_UTIL_BPS,
-            deployer // owner / admin
-        );
-        console.log("UtilizationOracle deployed:", address(oracle));
+        console.log("USDC Vault:         ", address(vaultUSDC));
+        console.log("WETH Vault:         ", address(vaultWETH));
+        console.log("WBTC Vault:         ", address(vaultWBTC));
 
-        // ── 7. Deploy AllocationStrategist (Tier-1 by default) ───────────────
-        AllocationStrategist strategist = new AllocationStrategist(
-            PLATFORM,
-            llmAgentId,
-            address(vault),
-            deployer // admin
-        );
-        console.log("AllocationStrategist deployed:", address(strategist));
+        // ══════════════════════════════════════════════════════════════════════
+        // 3. Shared infrastructure — Sentinel + Oracle
+        // ══════════════════════════════════════════════════════════════════════
 
-        // ── Grant ALLOCATOR_ROLE to strategist ────────────────────────────────
-        vault.grantRole(ALLOCATOR_ROLE, address(strategist));
-        console.log("ALLOCATOR_ROLE granted to strategist");
+        VaultSentinel sentinel = new VaultSentinel(PLATFORM, llmAgentId, deployer);
+        console.log("VaultSentinel:      ", address(sentinel));
 
-        // ── Wire oracle into strategist ───────────────────────────────────────
-        strategist.setOracle(address(oracle));
-        console.log("Oracle wired into strategist");
+        UtilizationOracle oracle =
+            new UtilizationOracle(TWAP_WINDOW, SPIKE_THRESHOLD_BPS, CAUTION_UTIL_BPS, CRITICAL_UTIL_BPS, deployer);
+        console.log("UtilizationOracle:  ", address(oracle));
 
-        // ── 8. Submit market additions via timelock ───────────────────────────
-        // Timelock is 1 hour (MIN_TIMELOCK). Run ExecuteAndSeed.s.sol after that.
-        vault.submitAddMarket(address(marketA), 50_000 * 1e6); // 50k USDC cap
-        vault.submitAddMarket(address(marketB), 50_000 * 1e6);
-        console.log("Market additions submitted to timelock queue");
-        console.log("WAIT AT LEAST 1 MINUTE before running ExecuteAndSeed.s.sol");
+        // ══════════════════════════════════════════════════════════════════════
+        // 4. AllocationStrategist — one per vault (immutable vault reference)
+        // ══════════════════════════════════════════════════════════════════════
 
-        // ── 9. Register vault in sentinel ─────────────────────────────────────
-        sentinel.registerVault(address(vault), true); // autoPause = true
-        console.log("Vault registered in sentinel with autoPause=true");
+        AllocationStrategist stratUSDC = new AllocationStrategist(PLATFORM, llmAgentId, address(vaultUSDC), deployer);
+        AllocationStrategist stratWETH = new AllocationStrategist(PLATFORM, llmAgentId, address(vaultWETH), deployer);
+        AllocationStrategist stratWBTC = new AllocationStrategist(PLATFORM, llmAgentId, address(vaultWBTC), deployer);
+
+        console.log("Strategist USDC:    ", address(stratUSDC));
+        console.log("Strategist WETH:    ", address(stratWETH));
+        console.log("Strategist WBTC:    ", address(stratWBTC));
+
+        // ══════════════════════════════════════════════════════════════════════
+        // 5. Mock lending markets — 2 per vault
+        // ══════════════════════════════════════════════════════════════════════
+
+        MockLendingMarket usdcA = new MockLendingMarket(address(usdc), address(vaultUSDC), "USDC Lending Pool A");
+        MockLendingMarket usdcB = new MockLendingMarket(address(usdc), address(vaultUSDC), "USDC Lending Pool B");
+        MockLendingMarket wethA = new MockLendingMarket(address(weth), address(vaultWETH), "WETH Lending Pool A");
+        MockLendingMarket wethB = new MockLendingMarket(address(weth), address(vaultWETH), "WETH Lending Pool B");
+        MockLendingMarket wbtcA = new MockLendingMarket(address(wbtc), address(vaultWBTC), "WBTC Lending Pool A");
+        MockLendingMarket wbtcB = new MockLendingMarket(address(wbtc), address(vaultWBTC), "WBTC Lending Pool B");
+
+        console.log("USDC Market A:      ", address(usdcA));
+        console.log("USDC Market B:      ", address(usdcB));
+        console.log("WETH Market A:      ", address(wethA));
+        console.log("WETH Market B:      ", address(wethB));
+        console.log("WBTC Market A:      ", address(wbtcA));
+        console.log("WBTC Market B:      ", address(wbtcB));
+
+        // ══════════════════════════════════════════════════════════════════════
+        // 6. Grant roles
+        // ══════════════════════════════════════════════════════════════════════
+
+        // SENTINEL_ROLE — one shared sentinel on all vaults
+        vaultUSDC.grantRole(SENTINEL_ROLE, address(sentinel));
+        vaultWETH.grantRole(SENTINEL_ROLE, address(sentinel));
+        vaultWBTC.grantRole(SENTINEL_ROLE, address(sentinel));
+
+        // ALLOCATOR_ROLE — each vault grants it to its own strategist
+        vaultUSDC.grantRole(ALLOCATOR_ROLE, address(stratUSDC));
+        vaultWETH.grantRole(ALLOCATOR_ROLE, address(stratWETH));
+        vaultWBTC.grantRole(ALLOCATOR_ROLE, address(stratWBTC));
+
+        console.log("Roles granted");
+
+        // ══════════════════════════════════════════════════════════════════════
+        // 7. Wire oracle into sentinel and all strategists
+        // ══════════════════════════════════════════════════════════════════════
+
+        sentinel.setOracle(address(oracle));
+        stratUSDC.setOracle(address(oracle));
+        stratWETH.setOracle(address(oracle));
+        stratWBTC.setOracle(address(oracle));
+
+        console.log("Oracle wired");
+
+        // ══════════════════════════════════════════════════════════════════════
+        // 8. Add markets to each vault (instant — no timelock)
+        // ══════════════════════════════════════════════════════════════════════
+
+        // USDC: caps in 6-decimal units (50k USDC each)
+        vaultUSDC.addMarket(address(usdcA), 50_000 * 1e6);
+        vaultUSDC.addMarket(address(usdcB), 50_000 * 1e6);
+
+        // WETH: caps in 18-decimal units (50 WETH each)
+        vaultWETH.addMarket(address(wethA), 50 * 1e18);
+        vaultWETH.addMarket(address(wethB), 50 * 1e18);
+
+        // WBTC: caps in 8-decimal units (5 WBTC each)
+        vaultWBTC.addMarket(address(wbtcA), 5 * 1e8);
+        vaultWBTC.addMarket(address(wbtcB), 5 * 1e8);
+
+        console.log("Markets added to all vaults");
+
+        // ══════════════════════════════════════════════════════════════════════
+        // 9. Register all vaults in sentinel (autoPause = true)
+        // ══════════════════════════════════════════════════════════════════════
+
+        sentinel.registerVault(address(vaultUSDC), true);
+        sentinel.registerVault(address(vaultWETH), true);
+        sentinel.registerVault(address(vaultWBTC), true);
+
+        console.log("All vaults registered in sentinel");
 
         vm.stopBroadcast();
 
-        // ── Output: paste these into .env ─────────────────────────────────────
-        console.log("\n========= COPY INTO .env =========");
-        console.log("MOCK_USDC_ADDRESS=", address(usdc));
-        console.log("CURATED_VAULT_ADDRESS=", address(vault));
+        // ══════════════════════════════════════════════════════════════════════
+        // Output — paste into .env
+        // ══════════════════════════════════════════════════════════════════════
+        console.log("\n====================================================");
+        console.log("COPY INTO .env");
+        console.log("====================================================");
+        console.log("");
+        console.log("# -- Shared --");
         console.log("VAULT_SENTINEL_ADDRESS=", address(sentinel));
-        console.log("MARKET_A_ADDRESS=", address(marketA));
-        console.log("MARKET_B_ADDRESS=", address(marketB));
         console.log("ORACLE_ADDRESS=", address(oracle));
-        console.log("STRATEGIST_ADDRESS=", address(strategist));
-        console.log("==================================\n");
-        console.log("NEXT STEP: wait 1 minute, then run ExecuteAndSeed.s.sol");
+        console.log("");
+        console.log("# -- USDC Vault --");
+        console.log("MOCK_USDC_ADDRESS=", address(usdc));
+        console.log("USDC_VAULT_ADDRESS=", address(vaultUSDC));
+        console.log("USDC_MARKET_A_ADDRESS=", address(usdcA));
+        console.log("USDC_MARKET_B_ADDRESS=", address(usdcB));
+        console.log("USDC_STRATEGIST_ADDRESS=", address(stratUSDC));
+        console.log("");
+        console.log("# -- WETH Vault --");
+        console.log("MOCK_WETH_ADDRESS=", address(weth));
+        console.log("WETH_VAULT_ADDRESS=", address(vaultWETH));
+        console.log("WETH_MARKET_A_ADDRESS=", address(wethA));
+        console.log("WETH_MARKET_B_ADDRESS=", address(wethB));
+        console.log("WETH_STRATEGIST_ADDRESS=", address(stratWETH));
+        console.log("");
+        console.log("# -- WBTC Vault --");
+        console.log("MOCK_WBTC_ADDRESS=", address(wbtc));
+        console.log("WBTC_VAULT_ADDRESS=", address(vaultWBTC));
+        console.log("WBTC_MARKET_A_ADDRESS=", address(wbtcA));
+        console.log("WBTC_MARKET_B_ADDRESS=", address(wbtcB));
+        console.log("WBTC_STRATEGIST_ADDRESS=", address(stratWBTC));
+        console.log("====================================================");
+        console.log("NEXT: run ExecuteAndSeed.s.sol");
     }
 }

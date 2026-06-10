@@ -17,7 +17,8 @@ contract StrategistTest is TestBase {
         super.setUp();
 
         // Deploy strategist; admin is this test contract
-        strategist = new AllocationStrategist(address(vault), address(this));
+        // Phase 3 constructor: (platform, llmAgentId, vault, admin)
+        strategist = new AllocationStrategist(address(platform), 1, address(vault), address(this));
 
         // Grant ALLOCATOR_ROLE to the strategist (use constant to avoid consuming vm.prank)
         vm.prank(admin);
@@ -52,10 +53,8 @@ contract StrategistTest is TestBase {
         CuratedVault.MarketTarget[] memory tgts = new CuratedVault.MarketTarget[](1);
         tgts[0] = CuratedVault.MarketTarget({market: address(marketA), targetAmount: aAmt});
 
-        CuratedVault.RebalanceGuard memory guard = CuratedVault.RebalanceGuard({
-            snapshotTotalAssets: ta,
-            snapshotEpoch: vault.currentEpoch()
-        });
+        CuratedVault.RebalanceGuard memory guard =
+            CuratedVault.RebalanceGuard({snapshotTotalAssets: ta, snapshotEpoch: vault.currentEpoch()});
 
         uint256 epochBefore = vault.currentEpoch();
         // admin == address(this)
@@ -73,8 +72,7 @@ contract StrategistTest is TestBase {
     function testStrategist_nonAdminReverts() public {
         CuratedVault.MarketTarget[] memory tgts = new CuratedVault.MarketTarget[](0);
         CuratedVault.RebalanceGuard memory guard = CuratedVault.RebalanceGuard({
-            snapshotTotalAssets: vault.totalAssets(),
-            snapshotEpoch: vault.currentEpoch()
+            snapshotTotalAssets: vault.totalAssets(), snapshotEpoch: vault.currentEpoch()
         });
 
         vm.expectRevert(AllocationStrategist.NotAdmin.selector);
@@ -104,11 +102,14 @@ contract StrategistTest is TestBase {
         caps[1] = 50_000e6;
 
         uint256[] memory targets = AllocationProjection.project(
-            mkts, weights, bals, caps,
+            mkts,
+            weights,
+            bals,
+            caps,
             100_000e6, // totalAssets
-            1_000,     // minIdleBps 10%
-            5_000,     // maxMktBps 50%
-            3_000      // maxTurnBps 30%
+            1_000, // minIdleBps 10%
+            5_000, // maxMktBps 50%
+            3_000 // maxTurnBps 30%
         );
 
         assertEq(targets[0], 0, "zero weights -> idle"); // Proves: zero weight = no allocation
@@ -135,10 +136,8 @@ contract StrategistTest is TestBase {
         // Budget = 100_000e6 - ceil(10% * 100_000e6) = 100_000e6 - 10_000e6 = 90_000e6
         // Each market gets 45_000e6
 
-        uint256[] memory targets = AllocationProjection.project(
-            mkts, weights, bals, caps,
-            totalAssets_, minIdleBps, 5_000, 9_000
-        );
+        uint256[] memory targets =
+            AllocationProjection.project(mkts, weights, bals, caps, totalAssets_, minIdleBps, 5_000, 9_000);
 
         // Both markets get 45_000e6 (half of 90_000e6 budget)
         assertEq(targets[0], 45_000e6, "equal weight A"); // Proves: proportional split
@@ -168,10 +167,8 @@ contract StrategistTest is TestBase {
         // B gets min(9_000 + 61_000, 50_000) = 50_000
         // Remaining overflow stays idle
 
-        uint256[] memory targets = AllocationProjection.project(
-            mkts, weights, bals, caps,
-            totalAssets_, 1_000, 6_000, 9_000
-        );
+        uint256[] memory targets =
+            AllocationProjection.project(mkts, weights, bals, caps, totalAssets_, 1_000, 6_000, 9_000);
 
         assertLe(targets[0], 20_000e6, "A within cap"); // Proves: cap respected
         // B absorbs overflow up to its cap
@@ -205,10 +202,8 @@ contract StrategistTest is TestBase {
         // A' = 10k + 35k * 10/70 = 10k + 5k = ~15k
 
         uint256 maxTurnBps = 1_000; // 10%
-        uint256[] memory targets = AllocationProjection.project(
-            mkts, weights, bals, caps,
-            totalAssets_, 1_000, 5_000, maxTurnBps
-        );
+        uint256[] memory targets =
+            AllocationProjection.project(mkts, weights, bals, caps, totalAssets_, 1_000, 5_000, maxTurnBps);
 
         // After scaling, total movement must be <= maxTurn
         uint256 totalDelta;
@@ -227,10 +222,8 @@ contract StrategistTest is TestBase {
         uint256[] memory bals = new uint256[](0);
         uint256[] memory caps = new uint256[](0);
 
-        uint256[] memory targets = AllocationProjection.project(
-            mkts, weights, bals, caps,
-            100_000e6, 1_000, 5_000, 3_000
-        );
+        uint256[] memory targets =
+            AllocationProjection.project(mkts, weights, bals, caps, 100_000e6, 1_000, 5_000, 3_000);
 
         assertEq(targets.length, 0, "empty result for empty markets");
     }
@@ -250,9 +243,14 @@ contract StrategistTest is TestBase {
         caps[1] = 50_000e6;
 
         uint256[] memory targets = AllocationProjection.project(
-            mkts, weights, bals, caps,
+            mkts,
+            weights,
+            bals,
+            caps,
             0, // totalAssets_ == 0
-            1_000, 5_000, 3_000
+            1_000,
+            5_000,
+            3_000
         );
 
         assertEq(targets[0], 0, "zero assets -> zero target");

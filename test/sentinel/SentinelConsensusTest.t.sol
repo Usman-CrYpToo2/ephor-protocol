@@ -9,7 +9,6 @@ import {GenericAdapter} from "../../src/Mock/GenericAdapter.sol";
 /// @notice D-6 regression: consensus threshold verification.
 ///         Also contains fuzz test for oracle bps clamping (I-11).
 contract SentinelConsensusTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 23 — D-6 Regression: Response Threshold Verification (SDD §7.3)
     // ══════════════════════════════════════════════════════════════════════════
@@ -26,21 +25,28 @@ contract SentinelConsensusTest is TestBase {
         marketA.setUtilization(20);
 
         VaultSentinel.RiskLevel hardLevel = sentinel.assessOnChain(address(vault));
-        assertEq(uint256(hardLevel), uint256(VaultSentinel.RiskLevel.Safe),
-            "D-6 precondition: assessOnChain must return Safe");
+        assertEq(
+            uint256(hardLevel),
+            uint256(VaultSentinel.RiskLevel.Safe),
+            "D-6 precondition: assessOnChain must return Safe"
+        );
 
         sentinel.checkVault{value: CHECK_VALUE}(address(vault));
         platform.simulateBelowThreshold(_latestRequestId(), "CRITICAL");
 
         (VaultSentinel.RiskLevel level,, string memory verdict) = sentinel.getLatestRisk(address(vault));
-        assertLt(uint256(level), uint256(VaultSentinel.RiskLevel.Critical),
-            "D-6: response below threshold must not apply AI verdict (CRITICAL)");
-        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Caution),
-            "D-6: fail-safe applies Caution floor when below threshold");
-        assertEq(verdict, "CONSENSUS_NOT_MET",
-            "D-6: below-threshold response must record CONSENSUS_NOT_MET");
-        assertFalse(vault.depositsPaused(),
-            "D-6: Caution must not auto-pause deposits");
+        assertLt(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Critical),
+            "D-6: response below threshold must not apply AI verdict (CRITICAL)"
+        );
+        assertEq(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Caution),
+            "D-6: fail-safe applies Caution floor when below threshold"
+        );
+        assertEq(verdict, "CONSENSUS_NOT_MET", "D-6: below-threshold response must record CONSENSUS_NOT_MET");
+        assertFalse(vault.depositsPaused(), "D-6: Caution must not auto-pause deposits");
     }
 
     /**
@@ -57,8 +63,11 @@ contract SentinelConsensusTest is TestBase {
         platform.simulateCallback(_latestRequestId(), "STABLE");
 
         (VaultSentinel.RiskLevel level,,) = sentinel.getLatestRisk(address(vault));
-        assertLe(uint256(level), uint256(VaultSentinel.RiskLevel.Caution),
-            "D-6: at-threshold response must be processed (not treated as failed)");
+        assertLe(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Caution),
+            "D-6: at-threshold response must be processed (not treated as failed)"
+        );
     }
 
     /**

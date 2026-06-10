@@ -128,6 +128,22 @@ contract MockLendingMarket {
         emit UtilizationSet(totalBorrowed, supplied);
     }
 
+    /// @notice Current supply APY in basis points. Settable; auto-computes from utilization if not set.
+    uint256 private _supplyRateBps;
+
+    function setSupplyRate(uint256 rateBps) external {
+        _supplyRateBps = rateBps;
+    }
+
+    function supplyRateBps() external view returns (uint256) {
+        if (_supplyRateBps > 0) return _supplyRateBps;
+        uint256 supplied = asset.balanceOf(address(this));
+        if (supplied == 0) return 0;
+        uint256 borrowed = totalBorrowed > supplied ? supplied : totalBorrowed;
+        uint256 util = borrowed * 10_000 / supplied;
+        return util * 20 / 100; // rough proxy: rate = 20% of utilization bps
+    }
+
     /// @notice Fast-forward interest without waiting real time.
     function fastForwardDays(uint256 d) external {
         uint256 factor = _rpow(RATE, d * 86_400);

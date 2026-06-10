@@ -1,5 +1,5 @@
 import React from 'react';
-import { RISK_THEME, formatUSDC, formatTime } from '../config';
+import { RISK_THEME, formatUSDC, formatBps, formatTime } from '../config';
 
 function StatCard({ label, children, className = '' }) {
   return (

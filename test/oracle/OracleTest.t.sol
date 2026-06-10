@@ -9,7 +9,6 @@ import {VaultSentinel} from "../../src/VaultSentinel.sol";
 /// @notice Unit tests for UtilizationOracle: accumulator, TWAP, effectiveUtil, isValid.
 ///         Also covers D-8 sentinel+oracle integration tests.
 contract OracleTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 21 — Oracle: accumulator + checkpoint + effectiveUtil
     // ══════════════════════════════════════════════════════════════════════════
@@ -103,9 +102,12 @@ contract OracleTest is TestBase {
 
         uint256 t0 = block.timestamp;
         orc.update(address(marketA));
-        vm.warp(t0 + 5 minutes);  orc.update(address(marketA));
-        vm.warp(t0 + 10 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 30 minutes); orc.update(address(marketA));
+        vm.warp(t0 + 5 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 10 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 30 minutes);
+        orc.update(address(marketA));
 
         (uint256 util, bool spikeDetected) = orc.effectiveUtil(address(marketA));
         assertFalse(spikeDetected, "oracle: no spike when spot ~= twap");
@@ -128,9 +130,12 @@ contract OracleTest is TestBase {
         marketA.setUtilization(30);
         uint256 t0 = block.timestamp;
         orc.update(address(marketA));
-        vm.warp(t0 + 5 minutes);  orc.update(address(marketA));
-        vm.warp(t0 + 10 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 30 minutes); orc.update(address(marketA));
+        vm.warp(t0 + 5 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 10 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 30 minutes);
+        orc.update(address(marketA));
 
         marketA.setUtilization(90);
         vm.warp(block.timestamp + 1);
@@ -158,9 +163,12 @@ contract OracleTest is TestBase {
         marketA.setUtilization(90);
         uint256 t0 = block.timestamp;
         orc.update(address(marketA));
-        vm.warp(t0 + 5 minutes);  orc.update(address(marketA));
-        vm.warp(t0 + 10 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 30 minutes); orc.update(address(marketA));
+        vm.warp(t0 + 5 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 10 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 30 minutes);
+        orc.update(address(marketA));
 
         marketA.setUtilization(96);
         vm.warp(block.timestamp + 1);
@@ -246,12 +254,18 @@ contract OracleTest is TestBase {
         marketA.setUtilization(96);
         uint256 t0 = block.timestamp;
         orc.update(address(marketA));
-        vm.warp(t0 + 5 minutes);  orc.update(address(marketA));
-        vm.warp(t0 + 10 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 15 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 20 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 25 minutes); orc.update(address(marketA));
-        vm.warp(t0 + 30 minutes); orc.update(address(marketA));
+        vm.warp(t0 + 5 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 10 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 15 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 20 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 25 minutes);
+        orc.update(address(marketA));
+        vm.warp(t0 + 30 minutes);
+        orc.update(address(marketA));
 
         vm.prank(admin);
         sentinel.setOracle(address(orc));

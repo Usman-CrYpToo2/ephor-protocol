@@ -5,9 +5,9 @@ import { ADDRESSES, ABIS, RPC_URL } from '../config';
 const staticProvider = new ethers.JsonRpcProvider(RPC_URL);
 
 export function useProtocol(userAddress) {
-  const [data, setData] = useState(null);
+  const [data, setData]           = useState(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError]         = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
   const pendingRef = useRef(false);
 
@@ -16,46 +16,75 @@ export function useProtocol(userAddress) {
     pendingRef.current = true;
 
     try {
-      const vault    = new ethers.Contract(ADDRESSES.vault,    ABIS.vault,    staticProvider);
-      const sentinel = new ethers.Contract(ADDRESSES.sentinel, ABIS.sentinel, staticProvider);
-      const usdc     = new ethers.Contract(ADDRESSES.usdc,     ABIS.usdc,     staticProvider);
-      const marketA  = new ethers.Contract(ADDRESSES.marketA,  ABIS.market,   staticProvider);
-      const marketB  = new ethers.Contract(ADDRESSES.marketB,  ABIS.market,   staticProvider);
+      const vault      = new ethers.Contract(ADDRESSES.vault,      ABIS.vault,      staticProvider);
+      const sentinel   = new ethers.Contract(ADDRESSES.sentinel,   ABIS.sentinel,   staticProvider);
+      const strategist = new ethers.Contract(ADDRESSES.strategist, ABIS.strategist, staticProvider);
+      const usdc       = new ethers.Contract(ADDRESSES.usdc,       ABIS.usdc,       staticProvider);
+      const marketA    = new ethers.Contract(ADDRESSES.marketA,    ABIS.market,     staticProvider);
+      const marketB    = new ethers.Contract(ADDRESSES.marketB,    ABIS.market,     staticProvider);
 
       const [
         totalAssets,
         depositsPaused,
-        idleBufferPct,
+        idleBufferBps,
+        minIdleBufferBps,
+        maxMarketBps,
+        maxTurnoverBps,
+        rebalanceEpochLength,
+        currentEpoch,
+        lastRebalanceTime,
         sharePrice,
         totalSupply,
+        // sentinel
         vaultInfoData,
         isPending,
         activeRequestId,
         latestRisk,
         history,
+        hardLevel,
+        // markets
         mktAUtil,
         mktBUtil,
+        mktARate,
+        mktBRate,
         mktABalance,
         mktBBalance,
-        mktAAllocPct,
-        mktBAllocPct,
+        mktAAllocBps,
+        mktBAllocBps,
+        // strategist
+        stratLastRequest,
+        stratActiveRequest,
       ] = await Promise.all([
         vault.totalAssets(),
         vault.depositsPaused(),
-        vault.idleBufferPct(),
+        vault.idleBufferBps(),
+        vault.minIdleBufferBps(),
+        vault.maxMarketBps(),
+        vault.maxTurnoverBps(),
+        vault.rebalanceEpochLength(),
+        vault.currentEpoch(),
+        vault.lastRebalanceTime(),
         vault.sharePrice(),
         vault.totalSupply(),
+        // sentinel
         sentinel.vaultInfo(ADDRESSES.vault),
         sentinel.isCheckPending(ADDRESSES.vault),
         sentinel.activeRequest(ADDRESSES.vault),
         sentinel.getLatestRisk(ADDRESSES.vault),
         sentinel.getHistory(ADDRESSES.vault),
+        sentinel.assessOnChain(ADDRESSES.vault),
+        // markets
         marketA.utilizationBps(),
         marketB.utilizationBps(),
+        marketA.supplyRateBps().catch(() => 0n),
+        marketB.supplyRateBps().catch(() => 0n),
         marketA.balanceOf(ADDRESSES.vault),
         marketB.balanceOf(ADDRESSES.vault),
-        vault.marketAllocationPct(ADDRESSES.marketA),
-        vault.marketAllocationPct(ADDRESSES.marketB),
+        vault.marketAllocationBps(ADDRESSES.marketA),
+        vault.marketAllocationBps(ADDRESSES.marketB),
+        // strategist
+        strategist.lastRequestAt(ADDRESSES.vault),
+        strategist.activeRequest(ADDRESSES.vault),
       ]);
 
       let userUsdcBal = 0n, userShares = 0n, userStt = 0n;
@@ -73,47 +102,68 @@ export function useProtocol(userAddress) {
           level:       Number(snap.level),
           verdict:     snap.rawVerdict,
           totalAssets: Number(snap.totalAssets) / 1e6,
-          idlePct:     Number(snap.idlePct),
+          idleBps:     Number(snap.idleBps),
         }))
         .reverse();
 
+      const totalA   = Number(totalAssets) / 1e6;
+      const idleBps  = Number(idleBufferBps);
+      const idleAmt  = Math.round(totalA * idleBps / 10000);
+      const deployed = totalA - idleAmt;
+
       setData({
         vault: {
-          totalAssets:    Number(totalAssets) / 1e6,
+          totalAssets:         totalA,
           depositsPaused,
-          idleBufferPct:  Number(idleBufferPct),
-          sharePrice:     Number(ethers.formatEther(sharePrice)),
-          totalSupply:    Number(ethers.formatUnits(totalSupply, 6)),
+          idleBufferBps:       idleBps,
+          minIdleBufferBps:    Number(minIdleBufferBps),
+          maxMarketBps:        Number(maxMarketBps),
+          maxTurnoverBps:      Number(maxTurnoverBps),
+          rebalanceEpochLength: Number(rebalanceEpochLength),
+          currentEpoch:        Number(currentEpoch),
+          lastRebalanceTime:   Number(lastRebalanceTime),
+          sharePrice:          Number(ethers.formatEther(sharePrice)),
+          totalSupply:         Number(ethers.formatUnits(totalSupply, 6)),
+          idleAmt,
+          deployed,
         },
         markets: [
           {
             address:       ADDRESSES.marketA,
             name:          'Market A',
-            allocationPct: Number(mktAAllocPct),
+            allocationBps: Number(mktAAllocBps),
             utilizationBps: Number(mktAUtil),
+            supplyRateBps: Number(mktARate),
             balance:       Number(mktABalance) / 1e6,
           },
           {
             address:       ADDRESSES.marketB,
             name:          'Market B',
-            allocationPct: Number(mktBAllocPct),
+            allocationBps: Number(mktBAllocBps),
             utilizationBps: Number(mktBUtil),
+            supplyRateBps: Number(mktBRate),
             balance:       Number(mktBBalance) / 1e6,
           },
         ],
         sentinel: {
-          registered:        vaultInfoData.registered,
-          autoPauseEnabled:  vaultInfoData.autoPauseEnabled,
-          lastLevel:         Number(vaultInfoData.lastLevel),
-          lastCheckedAt:     Number(vaultInfoData.lastCheckedAt),
-          totalChecks:       Number(vaultInfoData.totalChecks),
-          criticalCount:     Number(vaultInfoData.criticalCount),
-          isCheckPending:    isPending,
-          activeRequestId:   activeRequestId.toString(),
-          latestVerdict:     latestRisk.verdict,
-          latestVerdictTs:   Number(latestRisk.ts),
-          latestLevel:       Number(latestRisk.level),
-          history:           historyItems,
+          registered:       vaultInfoData.registered,
+          autoPauseEnabled: vaultInfoData.autoPauseEnabled,
+          lastLevel:        Number(vaultInfoData.lastLevel),
+          lastCheckedAt:    Number(vaultInfoData.lastCheckedAt),
+          totalChecks:      Number(vaultInfoData.totalChecks),
+          criticalCount:    Number(vaultInfoData.criticalCount),
+          isCheckPending:   isPending,
+          activeRequestId:  activeRequestId.toString(),
+          latestVerdict:    latestRisk.verdict,
+          latestVerdictTs:  Number(latestRisk.ts),
+          latestLevel:      Number(latestRisk.level),
+          hardLevel:        Number(hardLevel),
+          history:          historyItems,
+        },
+        strategist: {
+          lastRequestAt:    Number(stratLastRequest),
+          activeRequest:    stratActiveRequest.toString(),
+          isPending:        stratActiveRequest.toString() !== '0',
         },
         user: {
           address:     userAddress,
@@ -136,12 +186,7 @@ export function useProtocol(userAddress) {
 
   useEffect(() => {
     fetchData();
-
-    // Poll faster (5s) when a check is pending, otherwise 12s
-    const interval = setInterval(() => {
-      fetchData();
-    }, 12_000);
-
+    const interval = setInterval(fetchData, 12_000);
     return () => clearInterval(interval);
   }, [fetchData]);
 

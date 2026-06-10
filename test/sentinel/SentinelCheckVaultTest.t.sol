@@ -8,7 +8,6 @@ import {VaultSentinel} from "../../src/VaultSentinel.sol";
 
 /// @notice Tests for checkVault request flow, cooldown, and the 5-market coverage fix.
 contract SentinelCheckVaultTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 11 — checkVault and request flow
     // ══════════════════════════════════════════════════════════════════════════
@@ -116,14 +115,9 @@ contract SentinelCheckVaultTest is TestBase {
 
         vm.startPrank(curator);
         for (uint256 i; i < 5; i++) {
-            vault5.submitAddMarket(address(mkts[i]), 20_000 * 1e6);
+            vault5.addMarket(address(mkts[i]), 20_000 * 1e6);
         }
         vm.stopPrank();
-
-        vm.warp(block.timestamp + 3601);
-        for (uint256 i; i < 5; i++) {
-            vault5.executeAddMarket(address(mkts[i]), 20_000 * 1e6);
-        }
 
         vm.prank(admin);
         sentinel.registerVault(address(vault5), true);

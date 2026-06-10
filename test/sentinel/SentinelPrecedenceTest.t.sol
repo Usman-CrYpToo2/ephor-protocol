@@ -6,7 +6,6 @@ import {VaultSentinel} from "../../src/VaultSentinel.sol";
 
 /// @notice D-5 regression: on-chain precedence rule — AI can only escalate, never lower.
 contract SentinelPrecedenceTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 22 — D-5 Regression: Precedence Rule (SDD §7.4)
     // ══════════════════════════════════════════════════════════════════════════
@@ -24,15 +23,21 @@ contract SentinelPrecedenceTest is TestBase {
         marketA.setUtilization(96);
 
         VaultSentinel.RiskLevel hardLevel = sentinel.assessOnChain(address(vault));
-        assertEq(uint256(hardLevel), uint256(VaultSentinel.RiskLevel.Critical),
-            "D-5 precondition: assessOnChain must return Critical");
+        assertEq(
+            uint256(hardLevel),
+            uint256(VaultSentinel.RiskLevel.Critical),
+            "D-5 precondition: assessOnChain must return Critical"
+        );
 
         sentinel.checkVault{value: CHECK_VALUE}(address(vault));
         platform.simulateCallback(_latestRequestId(), "STABLE");
 
         (VaultSentinel.RiskLevel level,,) = sentinel.getLatestRisk(address(vault));
-        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Critical),
-            "D-5: HardLevel=Critical must not be lowered by AI=STABLE");
+        assertEq(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Critical),
+            "D-5: HardLevel=Critical must not be lowered by AI=STABLE"
+        );
         assertTrue(vault.depositsPaused(), "D-5: Critical EffectiveLevel must pause deposits");
     }
 
@@ -50,15 +55,21 @@ contract SentinelPrecedenceTest is TestBase {
         marketA.setUtilization(20);
 
         VaultSentinel.RiskLevel hardLevel = sentinel.assessOnChain(address(vault));
-        assertEq(uint256(hardLevel), uint256(VaultSentinel.RiskLevel.Safe),
-            "D-5 precondition: assessOnChain must return Safe");
+        assertEq(
+            uint256(hardLevel),
+            uint256(VaultSentinel.RiskLevel.Safe),
+            "D-5 precondition: assessOnChain must return Safe"
+        );
 
         sentinel.checkVault{value: CHECK_VALUE}(address(vault));
         platform.simulateCallback(_latestRequestId(), "DETERIORATING");
 
         (VaultSentinel.RiskLevel level,,) = sentinel.getLatestRisk(address(vault));
-        assertLt(uint256(level), uint256(VaultSentinel.RiskLevel.Critical),
-            "D-5: AI=DETERIORATING with HardLevel=Safe cannot produce Critical");
+        assertLt(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Critical),
+            "D-5: AI=DETERIORATING with HardLevel=Safe cannot produce Critical"
+        );
         assertFalse(vault.depositsPaused(), "D-5: Safe must not pause deposits");
     }
 
@@ -76,15 +87,21 @@ contract SentinelPrecedenceTest is TestBase {
         marketA.setUtilization(85);
 
         VaultSentinel.RiskLevel hardLevel = sentinel.assessOnChain(address(vault));
-        assertEq(uint256(hardLevel), uint256(VaultSentinel.RiskLevel.Caution),
-            "D-5 precondition: assessOnChain must return Caution");
+        assertEq(
+            uint256(hardLevel),
+            uint256(VaultSentinel.RiskLevel.Caution),
+            "D-5 precondition: assessOnChain must return Caution"
+        );
 
         sentinel.checkVault{value: CHECK_VALUE}(address(vault));
         platform.simulateCallback(_latestRequestId(), "DETERIORATING");
 
         (VaultSentinel.RiskLevel level,,) = sentinel.getLatestRisk(address(vault));
-        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Critical),
-            "D-5: HardLevel=Caution + AI=DETERIORATING must produce Critical");
+        assertEq(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Critical),
+            "D-5: HardLevel=Caution + AI=DETERIORATING must produce Critical"
+        );
         assertTrue(vault.depositsPaused(), "D-5: Critical EffectiveLevel must pause deposits");
     }
 
@@ -101,15 +118,21 @@ contract SentinelPrecedenceTest is TestBase {
         marketA.setUtilization(85);
 
         VaultSentinel.RiskLevel hardLevel = sentinel.assessOnChain(address(vault));
-        assertEq(uint256(hardLevel), uint256(VaultSentinel.RiskLevel.Caution),
-            "D-5 precondition: assessOnChain must return Caution");
+        assertEq(
+            uint256(hardLevel),
+            uint256(VaultSentinel.RiskLevel.Caution),
+            "D-5 precondition: assessOnChain must return Caution"
+        );
 
         sentinel.checkVault{value: CHECK_VALUE}(address(vault));
         platform.simulateTimeout(_latestRequestId());
 
         (VaultSentinel.RiskLevel level,, string memory verdict) = sentinel.getLatestRisk(address(vault));
-        assertEq(uint256(level), uint256(VaultSentinel.RiskLevel.Caution),
-            "D-5: AI failure must produce EffectiveLevel = HardLevel");
+        assertEq(
+            uint256(level),
+            uint256(VaultSentinel.RiskLevel.Caution),
+            "D-5: AI failure must produce EffectiveLevel = HardLevel"
+        );
         assertEq(verdict, "AI_UNAVAILABLE", "D-5: AI failure must record AI_UNAVAILABLE");
         assertFalse(vault.depositsPaused(), "D-5: Caution HardLevel must not auto-pause");
     }

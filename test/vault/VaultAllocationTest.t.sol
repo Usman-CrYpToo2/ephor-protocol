@@ -5,7 +5,6 @@ import {TestBase} from "../TestBase.sol";
 
 /// @notice Tests for allocation, deallocation, and timelocked market management.
 contract VaultAllocationTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 3 — Allocation and deallocation
     // ══════════════════════════════════════════════════════════════════════════
@@ -77,31 +76,15 @@ contract VaultAllocationTest is TestBase {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    //  GROUP 5 — Timelocked market management
+    //  GROUP 5 — Market management (instant, no timelock)
     // ══════════════════════════════════════════════════════════════════════════
 
-    function testVault_timelockBlocksImmediateExecution() public {
+    function testVault_curatorCanAddMarketInstantly() public {
         address fake = address(0xBEEF);
         vm.prank(curator);
-        vault.submitAddMarket(fake, 1_000 * 1e6);
+        vault.addMarket(fake, 1_000 * 1e6);
 
-        vm.expectRevert();
-        vault.executeAddMarket(fake, 1_000 * 1e6);
-    }
-
-    function testVault_revokeAction() public {
-        address fake = address(0xDEAD);
-        vm.prank(curator);
-        vault.submitAddMarket(fake, 1_000 * 1e6);
-
-        bytes32 id = keccak256(abi.encodePacked("addMarket", fake, uint256(1_000 * 1e6)));
-        vm.prank(admin);
-        vault.grantRole(SENTINEL_ROLE, address(this));
-        vault.revokeAction(id);
-        vm.prank(admin);
-        vault.revokeRole(SENTINEL_ROLE, address(this));
-
-        (, bool exists) = vault.pendingActions(id);
-        assertFalse(exists);
+        (bool enabled,) = vault.markets(fake);
+        assertTrue(enabled);
     }
 }

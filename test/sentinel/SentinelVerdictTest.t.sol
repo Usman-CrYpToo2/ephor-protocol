@@ -9,7 +9,6 @@ import "../../src/Interface/ISomnia.sol";
 
 /// @notice Tests for verdict handling: SAFE/CAUTION/CRITICAL responses, timeouts, and auto-pause.
 contract SentinelVerdictTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 12 — Verdict handling
     // ══════════════════════════════════════════════════════════════════════════
@@ -185,9 +184,7 @@ contract SentinelVerdictTest is TestBase {
 
         MockLendingMarket mkt = new MockLendingMarket(address(usdc), address(vaultNoPause), "NoPause Market");
         vm.prank(curator);
-        vaultNoPause.submitAddMarket(address(mkt), 50_000 * 1e6);
-        vm.warp(block.timestamp + 3601);
-        vaultNoPause.executeAddMarket(address(mkt), 50_000 * 1e6);
+        vaultNoPause.addMarket(address(mkt), 50_000 * 1e6);
 
         vm.prank(admin);
         sentinel.registerVault(address(vaultNoPause), false);

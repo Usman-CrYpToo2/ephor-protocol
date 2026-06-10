@@ -5,7 +5,6 @@ import {TestBase} from "../TestBase.sol";
 
 /// @notice Tests for sentinel query helpers: marketAllocationBps, idleBufferBps, utilizationBps.
 contract VaultMetricsTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 9 — Vault query helpers (consumed by sentinel)
     // ══════════════════════════════════════════════════════════════════════════

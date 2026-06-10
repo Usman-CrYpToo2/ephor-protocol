@@ -344,12 +344,7 @@ contract UtilizationOracle is IUtilizationOracle, Ownable {
      *         Returns (0, 0) when no observations exist.
      * @dev    Preserved for backward compatibility with existing callers and tests.
      */
-    function lastRecorded(address market)
-        external
-        view
-        override
-        returns (uint256 timestamp, uint256 utilBps)
-    {
+    function lastRecorded(address market) external view override returns (uint256 timestamp, uint256 utilBps) {
         MarketObservation storage obs = _observations[market];
         if (!obs.initialized) return (0, 0);
         return (obs.lastObservationTime, obs.lastSpotUtil);
@@ -362,11 +357,7 @@ contract UtilizationOracle is IUtilizationOracle, Ownable {
     /**
      * @dev Write a new checkpoint at `obs.checkpointHead`, then advance the head.
      */
-    function _writeCheckpoint(
-        MarketObservation storage obs,
-        uint256 accValue,
-        uint256 timestamp
-    ) internal {
+    function _writeCheckpoint(MarketObservation storage obs, uint256 accValue, uint256 timestamp) internal {
         obs.checkpointAccumulator[obs.checkpointHead] = accValue;
         obs.checkpointTimestamp[obs.checkpointHead] = timestamp;
         obs.checkpointHead = uint8((uint256(obs.checkpointHead) + 1) % CP_SIZE);
@@ -381,10 +372,11 @@ contract UtilizationOracle is IUtilizationOracle, Ownable {
      *
      *      Returns (accumulator, timestamp) of the chosen checkpoint.
      */
-    function _findCheckpointAt(
-        MarketObservation storage obs,
-        uint256 targetTime
-    ) internal view returns (uint256 cpAcc, uint256 cpTime) {
+    function _findCheckpointAt(MarketObservation storage obs, uint256 targetTime)
+        internal
+        view
+        returns (uint256 cpAcc, uint256 cpTime)
+    {
         // The write head points to the next slot to be written.
         // Valid slots are (head-1) down to (head-CP_SIZE), wrapping.
         // We scan all CP_SIZE slots and pick the best.
@@ -397,13 +389,15 @@ contract UtilizationOracle is IUtilizationOracle, Ownable {
         uint256 oldestTime = type(uint256).max;
         uint256 oldestAcc = 0;
 
-        for (uint8 i = 0; i < CP_SIZE; ) {
+        for (uint8 i = 0; i < CP_SIZE;) {
             uint256 cTime = obs.checkpointTimestamp[i];
             uint256 cAcc = obs.checkpointAccumulator[i];
 
             if (cTime == 0) {
                 // Uninitialized slot — skip
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
                 continue;
             }
 
@@ -422,7 +416,9 @@ contract UtilizationOracle is IUtilizationOracle, Ownable {
                 }
             }
 
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         if (!found) {

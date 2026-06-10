@@ -13,10 +13,8 @@ contract VaultReallocateTest is TestBase {
 
     // Helper: build a valid guard for the current vault state.
     function _makeGuard() internal view returns (CuratedVault.RebalanceGuard memory) {
-        return CuratedVault.RebalanceGuard({
-            snapshotTotalAssets: vault.totalAssets(),
-            snapshotEpoch: vault.currentEpoch()
-        });
+        return
+            CuratedVault.RebalanceGuard({snapshotTotalAssets: vault.totalAssets(), snapshotEpoch: vault.currentEpoch()});
     }
 
     // Helper: single-market target.
@@ -332,10 +330,8 @@ contract VaultReallocateTest is TestBase {
         // Snapshot is 10% off — beyond 5% tolerance
         uint256 staleSnapshot = ta * 90 / 100;
 
-        CuratedVault.RebalanceGuard memory guard = CuratedVault.RebalanceGuard({
-            snapshotTotalAssets: staleSnapshot,
-            snapshotEpoch: vault.currentEpoch()
-        });
+        CuratedVault.RebalanceGuard memory guard =
+            CuratedVault.RebalanceGuard({snapshotTotalAssets: staleSnapshot, snapshotEpoch: vault.currentEpoch()});
 
         vm.expectRevert(abi.encodeWithSelector(CuratedVault.InvariantViolation.selector, bytes32("I-10")));
         vm.prank(allocator);
@@ -427,11 +423,7 @@ contract VaultReallocateTest is TestBase {
         uint256 actualBal = marketA.balanceOf(address(vault));
         assertEq(actualBal, aAmt, "balance matches target"); // Proves I-1
         assertGe(vault.idleBufferBps(), vault.minIdleBufferBps(), "idle floor preserved"); // Proves I-3
-        assertLe(
-            actualBal * 10_000,
-            vault.maxMarketBps() * vault.totalAssets(),
-            "concentration within limit"
-        ); // Proves I-4
+        assertLe(actualBal * 10_000, vault.maxMarketBps() * vault.totalAssets(), "concentration within limit"); // Proves I-4
     }
 
     /// @notice Fuzz two-market split: both markets get valid targets.

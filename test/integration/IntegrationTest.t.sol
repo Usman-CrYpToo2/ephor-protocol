@@ -8,7 +8,6 @@ import {VaultSentinel} from "../../src/VaultSentinel.sol";
 
 /// @notice End-to-end integration flows spanning vault + sentinel + multiple vaults.
 contract IntegrationTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 16 — Full integration flows
     // ══════════════════════════════════════════════════════════════════════════
@@ -62,9 +61,7 @@ contract IntegrationTest is TestBase {
         vault2.grantRole(SENTINEL_ROLE, address(sentinel));
 
         vm.prank(curator);
-        vault2.submitAddMarket(address(marketC), 30_000 * 1e6);
-        vm.warp(block.timestamp + 3601);
-        vault2.executeAddMarket(address(marketC), 30_000 * 1e6);
+        vault2.addMarket(address(marketC), 30_000 * 1e6);
 
         vm.prank(admin);
         sentinel.registerVault(address(vault2), false);

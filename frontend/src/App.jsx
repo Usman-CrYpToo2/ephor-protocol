@@ -1,28 +1,26 @@
 import React, { useState, useCallback, useEffect } from 'react';
+import { Routes, Route, useNavigate } from 'react-router-dom';
 import { ethers } from 'ethers';
-import { ADDRESSES, ABIS, SOMNIA_NETWORK, CHAIN_ID, CHECK_DEPOSIT } from './config';
-import { useProtocol } from './hooks/useProtocol';
+import { ADDRESSES, ABIS, SOMNIA_NETWORK, CHAIN_ID, CHECK_DEPOSIT, REBALANCE_DEPOSIT } from './config';
 
-import Header     from './components/Header';
-import TabNav     from './components/TabNav';
-import DashboardPage from './pages/DashboardPage';
-import PositionPage  from './pages/PositionPage';
-import SentinelPage  from './pages/SentinelPage';
+import Header        from './components/Header';
+import VaultListPage from './pages/VaultListPage';
+import VaultDetailPage from './pages/VaultDetailPage';
 import DemoPage      from './pages/DemoPage';
 
-// ── Toast notifications ───────────────────────────────────────────────────────
+// ── Toast ─────────────────────────────────────────────────────────────────────
 
 function Toast({ toasts }) {
   return (
-    <div className="fixed top-[7rem] right-4 z-50 space-y-2 max-w-sm w-full pointer-events-none">
+    <div className="fixed top-[5rem] right-4 z-50 space-y-2 max-w-sm w-full pointer-events-none">
       {toasts.map(t => (
         <div
           key={t.id}
-          className={`pointer-events-auto animate-fade-in px-4 py-3 rounded-xl border text-sm shadow-2xl
+          className={`pointer-events-auto px-4 py-3 rounded-xl border text-sm shadow-2xl
             ${t.type === 'error'   ? 'bg-red-950/95 border-red-700/60 text-red-200'
             : t.type === 'success' ? 'bg-emerald-950/95 border-emerald-700/60 text-emerald-200'
             : t.type === 'pending' ? 'bg-blue-950/95 border-blue-700/60 text-blue-200'
-            :                        'bg-slate-900/95 border-slate-700/60 text-slate-200'}`}
+            :                        'bg-zinc-900/95 border-white/10 text-zinc-200'}`}
         >
           <div className="flex items-start gap-2">
             <span className="mt-0.5 flex-shrink-0 font-bold">
@@ -45,36 +43,17 @@ function Toast({ toasts }) {
   );
 }
 
-// ── Critical banner ───────────────────────────────────────────────────────────
-
-function CriticalBanner({ show }) {
-  if (!show) return null;
-  return (
-    <div className="bg-red-950/40 border-b border-red-800/40">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2.5 flex items-center gap-3">
-        <span className="text-red-400 text-base flex-shrink-0">⚠</span>
-        <p className="text-sm text-red-300">
-          <strong>Critical risk detected.</strong> Deposits are paused and emergency deallocation has been executed.
-          Review conditions in <strong>Demo Controls</strong> and use <strong>Unpause Deposits</strong> to restore operations.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [tab, setTab]                 = useState('dashboard');
   const [provider, setProvider]       = useState(null);
   const [signer, setSigner]           = useState(null);
   const [userAddress, setUserAddress] = useState(null);
   const [chainId, setChainId]         = useState(null);
   const [toasts, setToasts]           = useState([]);
 
-  const { data, isLoading, error, lastRefresh, refetch } = useProtocol(userAddress);
-
   // ── Toast helpers ─────────────────────────────────────────────────────────
+
   const addToast = useCallback((msg, type = 'info', hash = '', duration = 5000) => {
     const id = Date.now() + Math.random();
     setToasts(prev => [...prev, { id, msg, type, hash }]);
@@ -85,27 +64,27 @@ export default function App() {
   const removeToast = useCallback(id => setToasts(prev => prev.filter(t => t.id !== id)), []);
 
   // ── Wallet ────────────────────────────────────────────────────────────────
+
   const connectWallet = async () => {
     if (!window.ethereum) {
       addToast('MetaMask not found. Please install MetaMask.', 'error'); return;
     }
     try {
-      const p = new ethers.BrowserProvider(window.ethereum);
+      const p   = new ethers.BrowserProvider(window.ethereum);
       await p.send('eth_requestAccounts', []);
-      const s    = await p.getSigner();
+      const s   = await p.getSigner();
       const addr = await s.getAddress();
       const net  = await p.getNetwork();
       setProvider(p); setSigner(s); setUserAddress(addr); setChainId(Number(net.chainId));
-      addToast(`Wallet connected`, 'success');
+      addToast('Wallet connected', 'success');
     } catch (e) {
       if (e.code !== 4001) addToast('Connection failed: ' + e.message, 'error');
     }
   };
 
-  // Restore session on page load if MetaMask is already connected
   useEffect(() => {
     if (!window.ethereum) return;
-    const restore = async () => {
+    (async () => {
       try {
         const accounts = await window.ethereum.request({ method: 'eth_accounts' });
         if (!accounts.length) return;
@@ -114,8 +93,7 @@ export default function App() {
         const net = await p.getNetwork();
         setProvider(p); setSigner(s); setUserAddress(accounts[0]); setChainId(Number(net.chainId));
       } catch {}
-    };
-    restore();
+    })();
   }, []);
 
   useEffect(() => {
@@ -138,14 +116,14 @@ export default function App() {
       await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: SOMNIA_NETWORK.chainId }] });
     } catch (e) {
       if (e.code === 4902) {
-        try { await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [SOMNIA_NETWORK] }); }
-        catch {}
+        try { await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [SOMNIA_NETWORK] }); } catch {}
       }
     }
   };
 
-  // ── Transaction wrapper ───────────────────────────────────────────────────
-  const withTx = useCallback(async (label, fn) => {
+  // ── TX wrapper ────────────────────────────────────────────────────────────
+
+  const withTx = useCallback(async (label, fn, onSuccess) => {
     const pid = addToast(`${label}: confirm in MetaMask…`, 'pending', '', 0);
     try {
       const tx = await fn();
@@ -154,218 +132,387 @@ export default function App() {
       await tx.wait();
       removeToast(wid);
       addToast(`${label}: success!`, 'success', tx.hash);
-      setTimeout(refetch, 2000);
+      if (onSuccess) onSuccess();
       return true;
     } catch (e) {
       removeToast(pid);
       if (e.code !== 4001) addToast(`${label} failed: ${e.reason || e.shortMessage || e.message}`, 'error');
       return false;
     }
-  }, [addToast, removeToast, refetch]);
+  }, [addToast, removeToast]);
 
-  // ── Contract accessors ────────────────────────────────────────────────────
-  const c = useCallback(() => {
+  // ── Contract builders ─────────────────────────────────────────────────────
+
+  const contracts = useCallback((vaultConfig) => {
     if (!signer) return null;
+    const addr = vaultConfig?.address || ADDRESSES.vault;
     return {
-      vault:    new ethers.Contract(ADDRESSES.vault,    ABIS.vault,    signer),
-      sentinel: new ethers.Contract(ADDRESSES.sentinel, ABIS.sentinel, signer),
-      usdc:     new ethers.Contract(ADDRESSES.usdc,     ABIS.usdc,     signer),
-      marketA:  new ethers.Contract(ADDRESSES.marketA,  ABIS.market,   signer),
-      marketB:  new ethers.Contract(ADDRESSES.marketB,  ABIS.market,   signer),
+      vault:      new ethers.Contract(addr,                     ABIS.vault,      signer),
+      sentinel:   new ethers.Contract(vaultConfig?.sentinel   || ADDRESSES.sentinel,   ABIS.sentinel,   signer),
+      strategist: new ethers.Contract(vaultConfig?.strategist || ADDRESSES.strategist, ABIS.strategist, signer),
+      usdc:       new ethers.Contract(vaultConfig?.assetAddr  || ADDRESSES.usdc,       ABIS.usdc,       signer),
+      markets:    (vaultConfig?.markets || []).map(m =>
+        ({ ...m, contract: new ethers.Contract(m.address, ABIS.market, signer) })
+      ),
     };
   }, [signer]);
 
-  // ── Action handlers ───────────────────────────────────────────────────────
+  // ── Action handlers (passed to pages) ────────────────────────────────────
 
-  const handleCheckVault = async () => {
-    const cx = c();
-    if (!cx) return addToast('Connect wallet first', 'error');
-    await withTx('AI Risk Check', () =>
-      cx.sentinel.checkVault(ADDRESSES.vault, { value: ethers.parseEther(CHECK_DEPOSIT) })
-    );
-  };
-
-  const handleUnpause = async () => {
-    const cx = c();
-    if (!cx) return addToast('Connect wallet first', 'error');
-    await withTx('Unpause Deposits', () => cx.vault.unpauseDeposits());
-  };
-
-  const handleSetCritical = async () => {
-    const cx = c();
-    if (!cx) return addToast('Connect wallet first', 'error');
-    const pid = addToast('Setting CRITICAL scenario…', 'pending', '', 0);
-    try {
-      const mktABalance = data?.markets?.[0]?.balance ?? 0;
-      const target = 30000;
-      if (mktABalance < target) {
-        const toAdd = Math.floor((target - mktABalance) * 1e6);
-        const t1 = await cx.vault.allocate(ADDRESSES.marketA, BigInt(toAdd));
-        await t1.wait();
-      }
-      const t2 = await cx.marketA.setUtilization(96);
-      await t2.wait();
-      removeToast(pid);
-      addToast('CRITICAL scenario set — Market A: 60% alloc, 96% util. Trigger AI Check now.', 'success');
-      setTimeout(refetch, 2000);
-    } catch (e) {
-      removeToast(pid);
-      if (e.code !== 4001) addToast('Failed: ' + (e.reason || e.shortMessage || e.message), 'error');
-    }
-  };
-
-  const handleSetCaution = async () => {
-    const cx = c();
-    if (!cx) return addToast('Connect wallet first', 'error');
-    await withTx('Set CAUTION', () => cx.marketA.setUtilization(85));
-  };
-
-  const handleSetSafe = async () => {
-    const cx = c();
-    if (!cx) return addToast('Connect wallet first', 'error');
-    await withTx('Reset to SAFE', () => cx.marketA.setUtilization(30));
-  };
-
-  const handleMintUsdc = async () => {
-    const cx = c();
-    if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
-    await withTx('Mint USDC', () => cx.usdc.mint(userAddress, ethers.parseUnits('10000', 6)));
-  };
-
-  const handleDeposit = async (amount) => {
-    const cx = c();
-    if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
-    const parsedAmount = ethers.parseUnits(amount, 6);
-    const pid = addToast('Step 1/2: Approving USDC…', 'pending', '', 0);
-    try {
-      const t1 = await cx.usdc.approve(ADDRESSES.vault, parsedAmount);
-      await t1.wait();
-      removeToast(pid);
-      const wid = addToast('Step 2/2: Depositing into vault…', 'pending', '', 0);
-      const t2 = await cx.vault.deposit(parsedAmount, userAddress);
-      await t2.wait();
-      removeToast(wid);
-      addToast(`Deposited ${Number(amount).toLocaleString()} USDC! Shares minted to your wallet.`, 'success', t2.hash);
-      setTimeout(refetch, 2000);
-    } catch (e) {
-      removeToast(pid);
-      if (e.code !== 4001) addToast('Deposit failed: ' + (e.reason || e.shortMessage || e.message), 'error');
-    }
-  };
-
-  const handleWithdraw = async (shares) => {
-    const cx = c();
-    if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
-    await withTx('Withdraw', () =>
-      cx.vault.redeem(ethers.parseUnits(shares, 6), userAddress, userAddress)
-    );
-  };
-
-  const handleSimulateYield = async () => {
-    const cx = c();
-    if (!cx) return addToast('Connect wallet first', 'error');
-    const days = 30;
-    const pid  = addToast(`Simulating ${days}-day yield on both markets…`, 'pending', '', 0);
-    try {
-      const t1 = await cx.marketA.fastForwardDays(days);
-      await t1.wait();
-      const t2 = await cx.marketB.fastForwardDays(days);
-      await t2.wait();
-      removeToast(pid);
-      const yieldPct = ((Math.pow(1.05, days / 365) - 1) * 100).toFixed(2);
-      addToast(`+${yieldPct}% yield applied (5% APY × ${days} days). Check vault share price.`, 'success');
-      setTimeout(refetch, 2000);
-    } catch (e) {
-      removeToast(pid);
-      if (e.code !== 4001) addToast('Failed: ' + (e.reason || e.shortMessage || e.message), 'error');
-    }
-  };
-
-  // ── Derived state ─────────────────────────────────────────────────────────
   const isWrongNetwork = chainId !== null && chainId !== CHAIN_ID;
-  const isPaused       = data?.vault?.depositsPaused;
-  const riskLevel      = data?.sentinel?.latestLevel;
+  const isConnected    = !!signer && !isWrongNetwork;
+
+  const makeActions = useCallback((vaultConfig, refetch) => ({
+    onCheckVault: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      await withTx('AI Risk Check', () =>
+        cx.sentinel.checkVault(vaultConfig?.address || ADDRESSES.vault, { value: ethers.parseEther(CHECK_DEPOSIT) }),
+        refetch
+      );
+    },
+
+    onRequestRebalance: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      await withTx('AI Rebalance', () =>
+        cx.strategist.requestRebalance(vaultConfig?.address || ADDRESSES.vault, { value: ethers.parseEther(REBALANCE_DEPOSIT) }),
+        refetch
+      );
+    },
+
+    onUnpause: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      await withTx('Unpause Deposits', () => cx.vault.unpauseDeposits(), refetch);
+    },
+
+    onDeposit: async (amount) => {
+      const cx = contracts(vaultConfig);
+      if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
+      const decimals = vaultConfig?.assetDecimals ?? 6;
+      const parsed = ethers.parseUnits(amount, decimals);
+
+      // Pre-flight: check available capacity before wasting the approval tx
+      try {
+        const available = await cx.vault.maxDeposit(userAddress);
+        if (parsed > available) {
+          const avail = Number(available) / Math.pow(10, decimals);
+          return addToast(
+            avail <= 0
+              ? `Vault is at capacity. Withdraw first to free space.`
+              : `Exceeds vault capacity. Max deposit: ${avail.toLocaleString()} ${vaultConfig?.asset}`,
+            'error'
+          );
+        }
+      } catch {}
+
+      const pid = addToast('Step 1/2: Approving…', 'pending', '', 0);
+      try {
+        const t1 = await cx.usdc.approve(vaultConfig?.address || ADDRESSES.vault, parsed);
+        await t1.wait();
+        removeToast(pid);
+        const wid = addToast('Step 2/2: Depositing…', 'pending', '', 0);
+        const t2 = await cx.vault.deposit(parsed, userAddress);
+        await t2.wait();
+        removeToast(wid);
+        addToast(`Deposited ${Number(amount).toLocaleString()} ${vaultConfig?.asset || 'USDC'}!`, 'success', t2.hash);
+        if (refetch) setTimeout(refetch, 2000);
+      } catch (e) {
+        removeToast(pid);
+        if (e.code !== 4001) {
+          const msg = e.reason || e.shortMessage || e.message || '';
+          const friendly = msg.includes('DepositExceedsCap') || msg.includes('cap')
+            ? 'Vault is at capacity. Withdraw first to free space.'
+            : 'Deposit failed: ' + msg;
+          addToast(friendly, 'error');
+        }
+      }
+    },
+
+    onWithdraw: async (shares) => {
+      const cx = contracts(vaultConfig);
+      if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
+      const decimals = vaultConfig?.assetDecimals ?? 6;
+      await withTx('Withdraw', () =>
+        cx.vault.redeem(ethers.parseUnits(shares, decimals), userAddress, userAddress),
+        refetch
+      );
+    },
+
+    // ── Demo scenario: SAFE ──────────────────────────────────────────
+    // Txs: oracle + up to 2 deallocations + 2 setUtil = max 5
+    onSetSafe: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      const pid = addToast('Setting SAFE scenario…', 'pending', '', 0);
+      try {
+        // 1. Disable oracle
+        const t0 = await cx.sentinel.setOracle('0x0000000000000000000000000000000000000000');
+        await t0.wait();
+        // 2. Withdraw as much as the market actually holds (avoids no-liquidity with no extra mints)
+        //    Tiny unpaid-yield dust left in market is << 25% alloc threshold — SAFE still passes.
+        for (const m of cx.markets) {
+          const vaultPos = await m.contract.balanceOf(vaultConfig.address);
+          if (vaultPos === 0n) continue;
+          const marketTokens = await m.contract.totalAssets();
+          const toWithdraw = vaultPos < marketTokens ? vaultPos : marketTokens;
+          if (toWithdraw > 0n) {
+            const t = await cx.vault.deallocate(m.address, toWithdraw);
+            await t.wait();
+          }
+        }
+        // 3. Set low utilization on all markets
+        for (const m of cx.markets) {
+          const t = await m.contract.setUtilization(20);
+          await t.wait();
+        }
+        removeToast(pid);
+        addToast('SAFE scenario set. Go to Risk AI tab → Run Risk Check.', 'success');
+        if (refetch) setTimeout(refetch, 2000);
+      } catch (e) {
+        removeToast(pid);
+        if (e.code !== 4001) addToast('Set SAFE failed: ' + (e.reason || e.shortMessage || e.message), 'error');
+      }
+    },
+
+    // ── Demo scenario: CAUTION ───────────────────────────────────────
+    // Txs: oracle + 2 setUtil = 3 total
+    onSetCaution: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      const pid = addToast('Setting CAUTION scenario…', 'pending', '', 0);
+      try {
+        const t0 = await cx.sentinel.setOracle('0x0000000000000000000000000000000000000000');
+        await t0.wait();
+        const t1 = await cx.markets[0].contract.setUtilization(85);
+        await t1.wait();
+        const t2 = await cx.markets[1].contract.setUtilization(50);
+        await t2.wait();
+        removeToast(pid);
+        addToast('CAUTION scenario set. Go to Risk AI tab → Run Risk Check.', 'success');
+        if (refetch) setTimeout(refetch, 2000);
+      } catch (e) {
+        removeToast(pid);
+        if (e.code !== 4001) addToast('Set CAUTION failed: ' + (e.reason || e.shortMessage || e.message), 'error');
+      }
+    },
+
+    // ── Demo scenario: CRITICAL ──────────────────────────────────────
+    // Fast path (normal state): mktB already > 40% alloc → oracle + setUtil = 2 txs.
+    // Rebuild path (after Set SAFE emptied markets): oracle + 2 dealloc + alloc + setUtil = max 5 txs.
+    onSetCritical: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      const pid = addToast('Setting CRITICAL scenario…', 'pending', '', 0);
+      try {
+        const mktB = cx.markets[1];
+        const mktA = cx.markets[0];
+
+        // 1. Disable oracle
+        const t0 = await cx.sentinel.setOracle('0x0000000000000000000000000000000000000000');
+        await t0.wait();
+
+        // 2. Check if mktB already satisfies the > 40% alloc threshold
+        const totalAssets = await cx.vault.totalAssets();
+        const mktBPos    = await mktB.contract.balanceOf(vaultConfig.address);
+        const allocBps   = totalAssets > 0n ? mktBPos * 10000n / totalAssets : 0n;
+
+        if (allocBps <= 4000n) {
+          // Rebuild: safe-withdraw both markets (no minting — withdraw min of position vs tokens held)
+          const safeDeallocate = async (mkt) => {
+            const pos = await mkt.contract.balanceOf(vaultConfig.address);
+            if (pos === 0n) return;
+            const held = await mkt.contract.totalAssets();
+            const amt  = pos < held ? pos : held;
+            if (amt > 0n) { const t = await cx.vault.deallocate(mkt.address, amt); await t.wait(); }
+          };
+          await safeDeallocate(mktA);
+          await safeDeallocate(mktB);
+
+          // Allocate 45% of vault to mktB (55% stays idle — above 10% floor)
+          const fresh = await cx.vault.totalAssets();
+          const want  = fresh * 45n / 100n;
+          const cap   = (await cx.vault.markets(mktB.address))[1];
+          const alloc = want < cap ? want : cap * 9n / 10n;
+          if (alloc > 0n) { const t = await cx.vault.allocate(mktB.address, alloc); await t.wait(); }
+        }
+
+        // 3. Set mktB utilization to 96% (> 95% threshold)
+        const t3 = await mktB.contract.setUtilization(96);
+        await t3.wait();
+
+        removeToast(pid);
+        addToast('CRITICAL scenario set. Go to Risk AI tab → Run Risk Check.', 'success');
+        if (refetch) setTimeout(refetch, 2000);
+      } catch (e) {
+        removeToast(pid);
+        if (e.code !== 4001) addToast('Set CRITICAL failed: ' + (e.reason || e.shortMessage || e.message), 'error');
+      }
+    },
+
+    // ── Demo utility: Reset vault to seed state ──────────────────────
+    // Restores the exact state from ExecuteAndSeed.s.sol:
+    //   USDC 100k → 30k mktA / 20k mktB / 50k idle, util 45%/72%, rate 3%/5.2%
+    //   WETH 100  → 30  mktA / 20  mktB / 50  idle, util 55%/68%, rate 3.8%/5.1%
+    //   WBTC 10   → 3   mktA / 2   mktB / 5   idle, util 40%/62%, rate 2.8%/4.5%
+    onReset: async () => {
+      const cx   = contracts(vaultConfig);
+      if (!cx || !signer) return addToast('Connect wallet first', 'error');
+      const seed = vaultConfig?.seed;
+      if (!seed) return addToast('No seed config for this vault', 'error');
+
+      const dec      = vaultConfig.assetDecimals;
+      const toRaw    = (n) => BigInt(Math.round(n * 10 ** dec));
+      const seedDep  = toRaw(seed.deposit);
+      const seedA    = toRaw(seed.allocA);
+      const seedB    = toRaw(seed.allocB);
+      const mktA     = cx.markets[0];
+      const mktB     = cx.markets[1];
+
+      const pid = addToast('Resetting vault to seed state…', 'pending', '', 0);
+      try {
+        // 1. Disable oracle
+        const t0 = await cx.sentinel.setOracle('0x0000000000000000000000000000000000000000');
+        await t0.wait();
+
+        // 2. Safe-deallocate both markets (withdraw min of position vs tokens held)
+        for (const mkt of [mktA, mktB]) {
+          const pos  = await mkt.contract.balanceOf(vaultConfig.address);
+          if (pos === 0n) continue;
+          const held = await mkt.contract.totalAssets();
+          const amt  = pos < held ? pos : held;
+          if (amt > 0n) { const t = await cx.vault.deallocate(mkt.address, amt); await t.wait(); }
+        }
+
+        // 3. If vault is near empty, mint + deposit to reach seed amount
+        const currentTotal = await cx.vault.totalAssets();
+        if (currentTotal < seedDep / 10n) {
+          const toMint = seedDep - currentTotal;
+          const tm = await cx.usdc.mint(await signer.getAddress(), toMint);
+          await tm.wait();
+          const ta = await cx.usdc.approve(vaultConfig.address, toMint);
+          await ta.wait();
+          const td = await cx.vault.deposit(toMint, await signer.getAddress());
+          await td.wait();
+        }
+
+        // 4. Allocate to seed targets (capped by supply caps)
+        const [, capA] = await cx.vault.markets(mktA.address);
+        const [, capB] = await cx.vault.markets(mktB.address);
+        const allocA = seedA < capA ? seedA : capA * 9n / 10n;
+        const allocB = seedB < capB ? seedB : capB * 9n / 10n;
+        const t1 = await cx.vault.allocate(mktA.address, allocA);
+        await t1.wait();
+        const t2 = await cx.vault.allocate(mktB.address, allocB);
+        await t2.wait();
+
+        // 5. Restore original utilizations and supply rates
+        const t3 = await mktA.contract.setUtilization(seed.utilA);
+        await t3.wait();
+        const t4 = await mktB.contract.setUtilization(seed.utilB);
+        await t4.wait();
+        const t5 = await mktA.contract.setSupplyRate(seed.rateA);
+        await t5.wait();
+        const t6 = await mktB.contract.setSupplyRate(seed.rateB);
+        await t6.wait();
+
+        removeToast(pid);
+        addToast('Vault reset to initial seed state.', 'success');
+        if (refetch) setTimeout(refetch, 2000);
+      } catch (e) {
+        removeToast(pid);
+        if (e.code !== 4001) addToast('Reset failed: ' + (e.reason || e.shortMessage || e.message), 'error');
+      }
+    },
+
+    // ── Demo utility: Mint tokens ────────────────────────────────────
+    onMintToken: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
+      const decimals = vaultConfig?.assetDecimals ?? 6;
+      await withTx(`Mint ${vaultConfig?.asset}`, () =>
+        cx.usdc.mint(userAddress, ethers.parseUnits('10000', decimals)),
+        refetch
+      );
+    },
+
+    // ── Demo utility: Simulate yield ─────────────────────────────────
+    // Mints yield buffer to each market before advancing index so
+    // withdrawal never fails due to insufficient market liquidity.
+    onSimulateYield: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx) return addToast('Connect wallet first', 'error');
+      const pid = addToast('Simulating 30-day yield…', 'pending', '', 0);
+      try {
+        for (const m of cx.markets) {
+          // Read actual ERC20 balance held by the market contract
+          const marketBal = await m.contract.totalAssets();
+          if (marketBal > 0n) {
+            // Mint 6% buffer to the market (covers ~5% yield for 365 days at 5% APY + safety margin)
+            const yieldBuffer = marketBal * 6n / 100n;
+            const t1 = await cx.usdc.mint(m.address, yieldBuffer);
+            await t1.wait();
+          }
+          // Advance the interest index by 365 days (~5% APY yield)
+          const t2 = await m.contract.fastForwardDays(365);
+          await t2.wait();
+        }
+        removeToast(pid);
+        addToast('+~5% yield applied. Share price increased.', 'success');
+        if (refetch) setTimeout(refetch, 2000);
+      } catch (e) {
+        removeToast(pid);
+        if (e.code !== 4001) addToast('Yield simulation failed: ' + (e.reason || e.shortMessage || e.message), 'error');
+      }
+    },
+
+    // Keep legacy name for DemoPage compat
+    onMintUsdc: async () => {
+      const cx = contracts(vaultConfig);
+      if (!cx || !userAddress) return addToast('Connect wallet first', 'error');
+      const decimals = vaultConfig?.assetDecimals ?? 6;
+      await withTx(`Mint ${vaultConfig?.asset}`, () =>
+        cx.usdc.mint(userAddress, ethers.parseUnits('10000', decimals)),
+        refetch
+      );
+    },
+  }), [contracts, addToast, removeToast, withTx, userAddress]);
+
+  const walletProps = { userAddress, chainId, isConnected, isWrongNetwork, onConnect: connectWallet, onSwitchNetwork: switchNetwork };
 
   return (
-    <div className="min-h-screen bg-[#07090f]">
-      {/* Subtle grid bg */}
-      <div className="fixed inset-0 opacity-30 pointer-events-none"
-        style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, #1a2234 1px, transparent 0)', backgroundSize: '40px 40px' }}
-      />
-
-      <Header
-        userAddress={userAddress}
-        chainId={chainId}
-        onConnect={connectWallet}
-        onSwitchNetwork={switchNetwork}
-        isWrongNetwork={isWrongNetwork}
-      />
-
-      <TabNav active={tab} onChange={setTab} riskLevel={riskLevel} />
-
-      <CriticalBanner show={isPaused} />
-
+    <div className="min-h-screen bg-black text-white">
       <Toast toasts={toasts} />
+      <Header {...walletProps} />
 
-      {/* Wrong network overlay */}
       {isWrongNetwork && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-4">
-          <div className="bg-amber-950/40 border border-amber-700/40 rounded-2xl px-5 py-3.5 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="text-amber-400">⚠</span>
-              <div>
-                <div className="text-amber-300 font-semibold text-sm">Wrong Network — Switch to Somnia Testnet</div>
-                <div className="text-amber-400/60 text-xs">Chain ID 50312 required</div>
-              </div>
+        <div className="border-b border-amber-800/40 bg-amber-950/30">
+          <div className="max-w-7xl mx-auto px-6 py-2.5 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm text-amber-300">
+              <span>⚠</span>
+              <span>Wrong network — switch to Somnia Testnet (Chain ID 50312)</span>
             </div>
-            <button onClick={switchNetwork} className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold transition-colors">
+            <button onClick={switchNetwork}
+              className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold">
               Switch
             </button>
           </div>
         </div>
       )}
 
-      {/* Page content */}
-      <main className="relative max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        {tab === 'dashboard' && (
-          <DashboardPage data={data} isLoading={isLoading} onNavigate={setTab} />
-        )}
-        {tab === 'position' && (
-          <PositionPage
-            data={data}
-            isLoading={isLoading}
-            isConnected={!!signer && !isWrongNetwork}
-            onDeposit={handleDeposit}
-            onWithdraw={handleWithdraw}
-          />
-        )}
-        {tab === 'sentinel' && (
-          <SentinelPage
-            data={data}
-            isLoading={isLoading}
-            isConnected={!!signer && !isWrongNetwork}
-            onCheckVault={handleCheckVault}
-          />
-        )}
-        {tab === 'demo' && (
+      <Routes>
+        <Route path="/" element={<VaultListPage walletProps={walletProps} />} />
+        <Route path="/vault/:vaultAddress" element={
+          <VaultDetailPage walletProps={walletProps} makeActions={makeActions} />
+        } />
+        <Route path="/demo" element={
           <DemoPage
-            data={data}
-            isConnected={!!signer && !isWrongNetwork}
-            onSetCritical={handleSetCritical}
-            onSetCaution={handleSetCaution}
-            onSetSafe={handleSetSafe}
-            onSimulateYield={handleSimulateYield}
-            onMintUsdc={handleMintUsdc}
-            onUnpause={handleUnpause}
+            walletProps={walletProps}
+            makeActions={makeActions}
           />
-        )}
-
-        {/* Footer */}
-        <div className="flex items-center justify-between pt-8 pb-4 text-xs text-slate-700 border-t border-slate-800/40 mt-8">
-          <span>Ephor Protocol · Built on <a href="https://somnia.network" target="_blank" rel="noreferrer" className="hover:text-slate-500 transition-colors">Somnia Network</a> · Encode Club Agentathon</span>
-          {lastRefresh && <span>Refreshed {lastRefresh.toLocaleTimeString()}</span>}
-        </div>
-      </main>
+        } />
+      </Routes>
     </div>
   );
 }

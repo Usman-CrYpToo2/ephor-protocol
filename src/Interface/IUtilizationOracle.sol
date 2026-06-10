@@ -5,13 +5,7 @@ pragma solidity ^0.8.20;
 /// @notice Interface for the manipulation-resistant TWAP utilization oracle.
 interface IUtilizationOracle {
     /// @notice Emitted when spot util deviates from TWAP beyond spikeToleranceBps (AC-18).
-    event SuspiciousSpike(
-        address indexed market,
-        uint256 spot,
-        uint256 twapVal,
-        uint256 delta,
-        uint256 timestamp
-    );
+    event SuspiciousSpike(address indexed market, uint256 spot, uint256 twapVal, uint256 delta, uint256 timestamp);
 
     function update(address market) external;
     function twap(address market, uint256 window) external view returns (uint256);

@@ -9,7 +9,6 @@ import {MockUSDC} from "../../src/Mock/MockUSDC.sol";
 
 /// @notice Regression tests for defects D-3, D-4, D-7, D-9.
 contract VaultDefectsTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 17 — D-3 Regression: BPS Precision (AC-4)
     // ══════════════════════════════════════════════════════════════════════════
@@ -202,13 +201,7 @@ contract VaultDefectsTest is TestBase {
         vault.deposit(10_000 * 1e6, address(this));
 
         vm.prank(allocator);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                CuratedVault.IdleFloorBreached.selector,
-                1_000,
-                2_000
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(CuratedVault.IdleFloorBreached.selector, 1_000, 2_000));
         vault.allocate(address(marketA), 9_000 * 1e6);
 
         assertEq(vault.idleBufferBps(), 10_000, "D-7: vault must be fully idle after revert");

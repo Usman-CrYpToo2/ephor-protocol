@@ -114,10 +114,10 @@ contract VaultSentinel is Ownable {
     // ── AI regime labels ─────────────────────────────────────────────────────
     /// @dev Internal enum for parsed AI regime label.
     enum RegimeLabel {
-        Stable,      // AI says risk is stable / acceptable
-        Watch,       // AI says risk is elevated but manageable
+        Stable, // AI says risk is stable / acceptable
+        Watch, // AI says risk is elevated but manageable
         Deteriorating, // AI says risk is worsening
-        Unknown      // unrecognized output (fail-safe: no escalation)
+        Unknown // unrecognized output (fail-safe: no escalation)
     }
 
     // ── Per-vault registry ───────────────────────────────────────────────────
@@ -149,7 +149,7 @@ contract VaultSentinel is Ownable {
     mapping(uint256 => address) public pendingRequests; // requestId → vault
     mapping(address => uint256) public activeRequest; // vault → requestId (0=none)
 
-    uint256 public constant CHECK_COOLDOWN = 5 minutes;
+    uint256 public constant CHECK_COOLDOWN = 30 seconds;
 
     // ── Events ───────────────────────────────────────────────────────────────
     event VaultRegistered(address indexed vault, bool autoPause);
@@ -209,10 +209,12 @@ contract VaultSentinel is Ownable {
         IUtilizationOracle _oracle = oracle;
         if (address(_oracle) != address(0)) {
             uint256 cnt = IVault(vault).marketCount();
-            for (uint256 i; i < cnt; ) {
+            for (uint256 i; i < cnt;) {
                 address m = IVault(vault).marketList(i);
                 try _oracle.update(m) {} catch {}
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
             }
         }
 
@@ -228,9 +230,50 @@ contract VaultSentinel is Ownable {
             bool[] memory mSpike
         ) = _readMetrics(vault);
 
+        // ── Collect §9.3 extended fields: epoch, decimals, prev_idle, headroom, rate ──
+        IVault _v = IVault(vault);
+        uint256 epoch;
+        uint256 decimals;
+        try _v.currentEpoch() returns (uint256 e) {
+            epoch = e;
+        } catch {}
+        try _v.assetDecimals() returns (uint8 d) {
+            decimals = uint256(d);
+        } catch {}
+        uint256 prevIdleBps = _history[vault].length > 0 ? _history[vault][_history[vault].length - 1].idleBps : idleBps;
+
+        uint256[] memory mHeadroom = new uint256[](mCount);
+        uint256[] memory mRate = new uint256[](mCount);
+        for (uint256 i; i < mCount;) {
+            uint256 cap;
+            try _v.marketSupplyCap(mAddrs[i]) returns (uint256 c) {
+                cap = c;
+            } catch {}
+            uint256 bal = IMarket(mAddrs[i]).balanceOf(vault);
+            mHeadroom[i] = (totalA > 0 && cap > bal) ? (cap - bal) * 10_000 / totalA : 0;
+            try IMarket(mAddrs[i]).supplyRateBps() returns (uint256 r) {
+                mRate[i] = r;
+            } catch {}
+            unchecked {
+                ++i;
+            }
+        }
+
         // ── Build canonical feature-block prompt (§9.3) ───────────────────
         string memory userPrompt = _buildUserPrompt(
-            totalA, idleBps, mCount, mAddrs, mAllocBps, mUtilBps, mTwapBps, mSpike
+            totalA,
+            idleBps,
+            mCount,
+            mAddrs,
+            mAllocBps,
+            mUtilBps,
+            mTwapBps,
+            mSpike,
+            epoch,
+            decimals,
+            prevIdleBps,
+            mHeadroom,
+            mRate
         );
 
         // ── Encode LLM agent call ──────────────────────────────────────────
@@ -242,10 +285,10 @@ contract VaultSentinel is Ownable {
         allowed[2] = "DETERIORATING";
         bytes memory payload = abi.encodeWithSelector(
             ILLMInferenceAgent.inferString.selector,
-            userPrompt,       // prompt   — vault metrics feature block
-            _systemPrompt(),  // system   — regime classifier instructions
-            false,            // chainOfThought — off; constrained output only
-            allowed           // allowedValues — constrains model output
+            userPrompt, // prompt   — vault metrics feature block
+            _systemPrompt(), // system   — regime classifier instructions
+            false, // chainOfThought — off; constrained output only
+            allowed // allowedValues — constrains model output
         );
 
         // ── Send to Somnia platform ────────────────────────────────────────
@@ -293,7 +336,7 @@ contract VaultSentinel is Ownable {
 
         IUtilizationOracle _oracle = oracle;
 
-        for (uint256 i; i < cnt; ) {
+        for (uint256 i; i < cnt;) {
             address m = v.marketList(i);
 
             // Allocation bps — vault-internal, not flash-loan manipulable
@@ -321,7 +364,9 @@ contract VaultSentinel is Ownable {
                 maxEffectiveUtilBps = utilBps;
             }
 
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // Deterministic classification (SDD §7.2)
@@ -359,10 +404,7 @@ contract VaultSentinel is Ownable {
         Response[] memory responses,
         ResponseStatus status,
         Request memory details
-    )
-        external
-        onlyPlatform
-    {
+    ) external onlyPlatform {
         address vault = pendingRequests[requestId];
         require(vault != address(0), "unknown request");
 
@@ -379,11 +421,7 @@ contract VaultSentinel is Ownable {
         // Fail-safe: AI absence never produces Silent Safe — always at least Caution.
         // This preserves P-5 and the original "timeout → at least CAUTION" guarantee.
         // D-5: HardLevel is the floor; if HardLevel > Caution, that fires instead.
-        if (
-            status == ResponseStatus.TimedOut ||
-            status == ResponseStatus.Failed ||
-            responses.length == 0
-        ) {
+        if (status == ResponseStatus.TimedOut || status == ResponseStatus.Failed || responses.length == 0) {
             RiskLevel failLevel = hardLevel > RiskLevel.Caution ? hardLevel : RiskLevel.Caution;
             _applyEffectiveLevel(vault, failLevel, "AI_UNAVAILABLE");
             info.lastLevel = failLevel;
@@ -486,7 +524,7 @@ contract VaultSentinel is Ownable {
         uint256 worstUtil = 0;
 
         IUtilizationOracle _oracle = oracle;
-        for (uint256 i; i < cnt; ) {
+        for (uint256 i; i < cnt;) {
             address m = v.marketList(i);
             uint256 u;
             if (address(_oracle) != address(0)) {
@@ -504,7 +542,9 @@ contract VaultSentinel is Ownable {
                 worstUtil = u;
                 worst = m;
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // Only pull if util > EMERGENCY_UTIL_THRESHOLD (9000 bps = 90%)
@@ -553,7 +593,7 @@ contract VaultSentinel is Ownable {
         mSpike = new bool[](mCount);
 
         IUtilizationOracle _oracle = oracle;
-        for (uint256 i; i < mCount; ) {
+        for (uint256 i; i < mCount;) {
             address m = v.marketList(i);
             mAddrs[i] = m;
             mAllocBps[i] = v.marketAllocationBps(m);
@@ -573,7 +613,9 @@ contract VaultSentinel is Ownable {
                 mTwapBps[i] = spotVal;
                 mSpike[i] = false;
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -586,17 +628,18 @@ contract VaultSentinel is Ownable {
     function _systemPrompt() internal pure returns (string memory) {
         return "You are a portfolio-risk regime classifier for a yield vault holding a single configured asset. "
             "Inputs are canonical integer features: ratios in basis points (dimensionless, asset-agnostic), "
-            "amounts in the vault asset native units with decimal count given in the PORTFOLIO header. "
-            "The smart contract enforces all hard numeric limits. "
+            "amounts in the vault asset's native units with decimal count given in the PORTFOLIO header. "
+            "The smart contract already enforces every hard numeric limit. "
             "Your job: judge the overall trajectory and concentration of risk no single limit captures. "
+            "Use the AGGREGATE line to see multi-market patterns. Use prev_idle vs idle to judge trajectory. "
             "A spike=1 means a flash-loan manipulation was detected -- treat this as an additional risk signal. "
             "Output exactly one of: STABLE, WATCH, DETERIORATING. No other text.";
     }
 
     /**
-     * @dev Build the canonical feature-block user prompt (SDD §9.3).
-     *      All values are integers (bps or raw amounts). No truncation.
-     *      Lossless canonical inputs (P-4, L-2, D-2 fix: no _u formatter).
+     * @dev Build the canonical §9.3 feature-block prompt.
+     *      Full grammar: PORTFOLIO header, AGGREGATE line, per-market lines.
+     *      All values are integers. Ratios in bps. Amounts in asset native units.
      */
     function _buildUserPrompt(
         uint256 totalA,
@@ -606,26 +649,85 @@ contract VaultSentinel is Ownable {
         uint256[] memory mAllocBps,
         uint256[] memory mUtilBps,
         uint256[] memory mTwapBps,
-        bool[] memory mSpike
+        bool[] memory mSpike,
+        uint256 epoch,
+        uint256 decimals,
+        uint256 prevIdleBps,
+        uint256[] memory mHeadroom,
+        uint256[] memory mRate
     ) internal pure returns (string memory s) {
+        // ── PORTFOLIO header ──────────────────────────────────────────────
         s = string(
             abi.encodePacked(
-                "PORTFOLIO|ta=", _u(totalA), "|idle=", _u(idleBps), "|mkts=", _u(mCount), " "
+                "PORTFOLIO|ta=",
+                _u(totalA),
+                "|decimals=",
+                _u(decimals),
+                "|idle=",
+                _u(idleBps),
+                "|mkts=",
+                _u(mCount),
+                "|epoch=",
+                _u(epoch),
+                "|prev_idle=",
+                _u(prevIdleBps)
             )
         );
-        for (uint256 i; i < mCount; ) {
+
+        // ── AGGREGATE line — cross-market pattern signals ─────────────────
+        uint256 mktsNearCaution = 0;
+        uint256 maxUtil = 0;
+        uint256 minUtil = type(uint256).max;
+        uint256 maxAlloc = 0;
+        uint256 minAlloc = type(uint256).max;
+        for (uint256 i; i < mCount;) {
+            if (mUtilBps[i] > 7_000) mktsNearCaution++;
+            if (mUtilBps[i] > maxUtil) maxUtil = mUtilBps[i];
+            if (mUtilBps[i] < minUtil) minUtil = mUtilBps[i];
+            if (mAllocBps[i] > maxAlloc) maxAlloc = mAllocBps[i];
+            if (mAllocBps[i] < minAlloc) minAlloc = mAllocBps[i];
+            unchecked {
+                ++i;
+            }
+        }
+        if (mCount == 0) minUtil = 0;
+        minAlloc = 0;
+        s = string(
+            abi.encodePacked(
+                s,
+                "\nAGGREGATE|mkts_near_caution=",
+                _u(mktsNearCaution),
+                "|util_dispersion=",
+                _u(maxUtil > minUtil ? maxUtil - minUtil : 0),
+                "|alloc_dispersion=",
+                _u(maxAlloc > minAlloc ? maxAlloc - minAlloc : 0)
+            )
+        );
+
+        // ── Per-market lines ──────────────────────────────────────────────
+        for (uint256 i; i < mCount;) {
             s = string(
                 abi.encodePacked(
                     s,
-                    "M", _u(i + 1),
-                    "|util=", _u(mUtilBps[i]),
-                    "|twap=", _u(mTwapBps[i]),
-                    "|spike=", mSpike[i] ? "1" : "0",
-                    "|alloc=", _u(mAllocBps[i]),
-                    " "
+                    "\nM",
+                    _u(i + 1),
+                    "|util=",
+                    _u(mUtilBps[i]),
+                    "|twap=",
+                    _u(mTwapBps[i]),
+                    "|spike=",
+                    mSpike[i] ? "1" : "0",
+                    "|alloc=",
+                    _u(mAllocBps[i]),
+                    "|headroom=",
+                    _u(mHeadroom[i]),
+                    "|rate=",
+                    _u(mRate[i])
                 )
             );
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -723,11 +825,7 @@ contract VaultSentinel is Ownable {
         return _history[vault];
     }
 
-    function getLatestRisk(address vault)
-        external
-        view
-        returns (RiskLevel level, uint256 ts, string memory verdict)
-    {
+    function getLatestRisk(address vault) external view returns (RiskLevel level, uint256 ts, string memory verdict) {
         RiskSnapshot[] storage h = _history[vault];
         if (h.length == 0) return (RiskLevel.Safe, 0, "NOT_CHECKED");
         RiskSnapshot storage latest = h[h.length - 1];

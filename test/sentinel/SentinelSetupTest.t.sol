@@ -6,7 +6,6 @@ import {CuratedVault} from "../../src/CuratedVault.sol";
 
 /// @notice Tests for vault registration and sentinel admin (owner) functions.
 contract SentinelSetupTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 10 — Vault registration
     // ══════════════════════════════════════════════════════════════════════════

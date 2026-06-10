@@ -7,6 +7,9 @@ broadcast/
 
 # Claude Code — ignore local settings, track project commands and specs
 .claude/settings.local.json
+.claude/plan/
+.claude/specs/
+.claude/worktrees/
 
 # Docs
 docs/
@@ -41,9 +44,33 @@ store.md
 SECURITY_AUDIT_REPORT.md
 vulnerability_summary.md
 
+# Submission document generator scripts and output
+make_docx.py
+make_pptx.py
+EphorProtocol.docx
+EphorProtocol.pptx
+projectdescription.txt
+scriptvideo.md
+
+# Session scratch notes (working docs, not protocol)
+newchanges.md
+timelock.md
+frontend.md
+
+# Screenshots and session images dropped at repo root
+*.png
+*.jpg
+*.jpeg
+
 # Auto-added by /commit — runtime output & scratch files
 history.txt
 submission.txt
+
+# Debug / one-off Foundry scripts (not part of deployment flow)
+script/Test*.s.sol
+script/Trigger*.s.sol
+script/Verify*.s.sol
+script/UpdateCaps.s.sol
 
 # Claude Code skill packages (generated binary archives)
 *.skill

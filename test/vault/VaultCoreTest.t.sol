@@ -6,7 +6,6 @@ import {MockUSDC} from "../../src/Mock/MockUSDC.sol";
 
 /// @notice Tests for ERC-4626 core (deposit/redeem/shares/yield) and MockUSDC sanity.
 contract VaultCoreTest is TestBase {
-
     // ══════════════════════════════════════════════════════════════════════════
     //  GROUP 1 — MockUSDC sanity checks
     // ══════════════════════════════════════════════════════════════════════════
