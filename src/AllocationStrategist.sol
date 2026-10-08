@@ -256,8 +256,6 @@ contract AllocationStrategist is ReentrancyGuard {
         ResponseStatus status,
         Request memory details
     ) external onlyPlatform {
-        details; // reserved for future consensus checks
-
         PendingRebalance memory pending = pendingRequests[requestId];
         if (pending.vault == address(0)) revert UnknownRequest();
 
@@ -276,6 +274,12 @@ contract AllocationStrategist is ReentrancyGuard {
         // ── Fail-safe: platform error ─────────────────────────────────────
         if (status == ResponseStatus.TimedOut || status == ResponseStatus.Failed || responses.length == 0) {
             emit RebalanceSkipped(vault_, "AI_UNAVAILABLE");
+            return;
+        }
+
+        // ── Fail-safe: consensus not reached (D-6, as in VaultSentinel) ───
+        if (details.responseCount < details.threshold) {
+            emit RebalanceSkipped(vault_, "CONSENSUS_NOT_MET");
             return;
         }
 
@@ -486,11 +490,15 @@ contract AllocationStrategist is ReentrancyGuard {
         if (v == 0) return "0";
         uint256 t = v;
         uint256 d;
-        while (t != 0) d++;
-        t /= 10;
+        while (t != 0) {
+            d++;
+            t /= 10;
+        }
         bytes memory b = new bytes(d);
-        while (v != 0) b[--d] = bytes1(uint8(48 + v % 10));
-        v /= 10;
+        while (v != 0) {
+            b[--d] = bytes1(uint8(48 + v % 10));
+            v /= 10;
+        }
         return string(b);
     }
 

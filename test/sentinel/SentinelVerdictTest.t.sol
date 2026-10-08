@@ -183,8 +183,7 @@ contract SentinelVerdictTest is TestBase {
         vaultNoPause.grantRole(SENTINEL_ROLE, address(sentinel));
 
         MockLendingMarket mkt = new MockLendingMarket(address(usdc), address(vaultNoPause), "NoPause Market");
-        vm.prank(curator);
-        vaultNoPause.addMarket(address(mkt), 50_000 * 1e6);
+        _addMarket(vaultNoPause, address(mkt), 50_000 * 1e6);
 
         vm.prank(admin);
         sentinel.registerVault(address(vaultNoPause), false);

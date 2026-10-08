@@ -6,7 +6,8 @@ pragma solidity ^0.8.20;
  * @notice Step 2 of 2 — Seeds all three vaults with initial deposits,
  *         allocations, demo utilization, and supply rates.
  *
- *  Run immediately after DeployAndSubmit.s.sol (no timelock to wait for).
+ *  Run once the vault timelock (default 1 minute) has passed since
+ *  DeployAndSubmit.s.sol queued the market additions.
  *
  *    source .env
  *    forge script script/ExecuteAndSeed.s.sol \
@@ -75,6 +76,22 @@ contract ExecuteAndSeed is Script {
         MockLendingMarket mktWbtcB = MockLendingMarket(wbtcMarketB);
 
         vm.startBroadcast(deployerKey);
+
+        // ══════════════════════════════════════════════════════════════════════
+        // Execute the market additions queued by DeployAndSubmit
+        // ══════════════════════════════════════════════════════════════════════
+        vaultUSDC.executeAddMarket(usdcMarketA, 50_000 * 1e6);
+        vaultUSDC.executeAddMarket(usdcMarketB, 50_000 * 1e6);
+        vaultWETH.executeAddMarket(wethMarketA, 50 * 1e18);
+        vaultWETH.executeAddMarket(wethMarketB, 50 * 1e18);
+        vaultWBTC.executeAddMarket(wbtcMarketA, 5 * 1e8);
+        vaultWBTC.executeAddMarket(wbtcMarketB, 5 * 1e8);
+
+        // Demo setting: the contract default is a 1-hour rebalance epoch; the
+        // testnet demo uses 1 minute so rebalances can be shown back to back.
+        vaultUSDC.setRebalanceEpochLength(1 minutes);
+        vaultWETH.setRebalanceEpochLength(1 minutes);
+        vaultWBTC.setRebalanceEpochLength(1 minutes);
 
         // ══════════════════════════════════════════════════════════════════════
         // USDC VAULT — seed

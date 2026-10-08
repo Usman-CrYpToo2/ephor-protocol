@@ -76,15 +76,97 @@ contract VaultAllocationTest is TestBase {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    //  GROUP 5 — Market management (instant, no timelock)
+    //  GROUP 5 — Timelocked market and cap management
     // ══════════════════════════════════════════════════════════════════════════
 
-    function testVault_curatorCanAddMarketInstantly() public {
+    function testVault_timelockBlocksImmediateExecution() public {
         address fake = address(0xBEEF);
         vm.prank(curator);
-        vault.addMarket(fake, 1_000 * 1e6);
+        vault.submitAddMarket(fake, 1_000 * 1e6);
 
+        vm.expectRevert(bytes("timelock active"));
+        vault.executeAddMarket(fake, 1_000 * 1e6);
+
+        vm.warp(block.timestamp + vault.timelock());
+        vault.executeAddMarket(fake, 1_000 * 1e6);
         (bool enabled,) = vault.markets(fake);
         assertTrue(enabled);
+    }
+
+    function testVault_duplicateQueuedMarketCannotExecuteTwice() public {
+        address fake = address(0xBEEF);
+        vm.startPrank(curator);
+        vault.submitAddMarket(fake, 1_000 * 1e6);
+        vault.submitAddMarket(fake, 2_000 * 1e6);
+        vm.stopPrank();
+        vm.warp(block.timestamp + vault.timelock());
+
+        uint256 countBefore = vault.marketCount();
+        vault.executeAddMarket(fake, 1_000 * 1e6);
+        vm.expectRevert(bytes("already enabled"));
+        vault.executeAddMarket(fake, 2_000 * 1e6);
+        assertEq(vault.marketCount(), countBefore + 1, "market listed once");
+    }
+
+    function testVault_revokeActionCancelsQueuedMarket() public {
+        address fake = address(0xDEAD);
+        vm.prank(curator);
+        vault.submitAddMarket(fake, 1_000 * 1e6);
+
+        bytes32 id = keccak256(abi.encodePacked("addMarket", fake, uint256(1_000 * 1e6)));
+        vm.prank(address(sentinel));
+        vault.revokeAction(id);
+
+        (, bool exists) = vault.pendingActions(id);
+        assertFalse(exists);
+        vm.warp(block.timestamp + vault.timelock());
+        vm.expectRevert(bytes("no pending action"));
+        vault.executeAddMarket(fake, 1_000 * 1e6);
+    }
+
+    function testVault_capIncreaseIsTimelocked() public {
+        vm.prank(curator);
+        vault.setSupplyCap(address(marketA), 60_000 * 1e6);
+        assertEq(vault.marketSupplyCap(address(marketA)), 50_000 * 1e6, "not applied yet");
+
+        vm.expectRevert(bytes("timelock active"));
+        vault.executeSetCap(address(marketA), 60_000 * 1e6);
+
+        vm.warp(block.timestamp + vault.timelock());
+        vault.executeSetCap(address(marketA), 60_000 * 1e6);
+        assertEq(vault.marketSupplyCap(address(marketA)), 60_000 * 1e6);
+    }
+
+    function testVault_sentinelCanLowerButNotRaiseCap() public {
+        vm.prank(address(sentinel));
+        vault.setSupplyCap(address(marketA), 10_000 * 1e6);
+        assertEq(vault.marketSupplyCap(address(marketA)), 10_000 * 1e6);
+
+        vm.prank(address(sentinel));
+        vm.expectRevert(bytes("curator only"));
+        vault.setSupplyCap(address(marketA), 20_000 * 1e6);
+    }
+
+    function testVault_setTimelockBounds() public {
+        vm.startPrank(curator);
+        vault.setTimelock(2 hours);
+        assertEq(vault.timelock(), 2 hours);
+        vm.expectRevert(bytes("bad delay"));
+        vault.setTimelock(30 seconds);
+        vm.expectRevert(bytes("bad delay"));
+        vault.setTimelock(4 weeks);
+        vm.stopPrank();
+    }
+
+    function testVault_allocateBlockedWhilePaused() public {
+        usdc.approve(address(vault), 10_000 * 1e6);
+        vault.deposit(10_000 * 1e6, address(this));
+
+        vm.prank(address(sentinel));
+        vault.pauseDeposits();
+
+        vm.prank(allocator);
+        vm.expectRevert(bytes("paused: no new allocation"));
+        vault.allocate(address(marketA), 1_000 * 1e6);
     }
 }

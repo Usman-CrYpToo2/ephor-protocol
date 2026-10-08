@@ -124,11 +124,9 @@ abstract contract TestBase is Test {
         marketA = new MockLendingMarket(address(usdc), address(vault), "Market A");
         marketB = new MockLendingMarket(address(usdc), address(vault), "Market B");
 
-        // 7. Add markets (instant, no timelock)
-        vm.startPrank(curator);
-        vault.addMarket(address(marketA), 50_000 * 1e6);
-        vault.addMarket(address(marketB), 50_000 * 1e6);
-        vm.stopPrank();
+        // 7. Add markets through the timelock
+        _addMarket(vault, address(marketA), 50_000 * 1e6);
+        _addMarket(vault, address(marketB), 50_000 * 1e6);
 
         // 8. Advance time so sentinel cooldown, rebalance epoch, and mock timeout math (block.timestamp - 120) work correctly
         vm.warp(block.timestamp + 200);
@@ -141,6 +139,14 @@ abstract contract TestBase is Test {
         usdc.mint(user1, 10_000 * 1e6);
         usdc.mint(user2, 10_000 * 1e6);
         usdc.mint(address(this), 500_000 * 1e6);
+    }
+
+    /// @dev Queue a market as curator, wait out the timelock, execute.
+    function _addMarket(CuratedVault v, address market, uint256 cap) internal {
+        vm.prank(curator);
+        v.submitAddMarket(market, cap);
+        vm.warp(block.timestamp + v.timelock());
+        v.executeAddMarket(market, cap);
     }
 
     receive() external payable {}

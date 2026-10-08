@@ -60,8 +60,7 @@ contract IntegrationTest is TestBase {
         vm.prank(admin);
         vault2.grantRole(SENTINEL_ROLE, address(sentinel));
 
-        vm.prank(curator);
-        vault2.addMarket(address(marketC), 30_000 * 1e6);
+        _addMarket(vault2, address(marketC), 30_000 * 1e6);
 
         vm.prank(admin);
         sentinel.registerVault(address(vault2), false);

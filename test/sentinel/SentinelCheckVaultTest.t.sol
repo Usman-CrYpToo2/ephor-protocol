@@ -113,11 +113,9 @@ contract SentinelCheckVaultTest is TestBase {
         mkts[3] = new MockLendingMarket(address(usdc), address(vault5), "M4");
         mkts[4] = new MockLendingMarket(address(usdc), address(vault5), "M5");
 
-        vm.startPrank(curator);
         for (uint256 i; i < 5; i++) {
-            vault5.addMarket(address(mkts[i]), 20_000 * 1e6);
+            _addMarket(vault5, address(mkts[i]), 20_000 * 1e6);
         }
-        vm.stopPrank();
 
         vm.prank(admin);
         sentinel.registerVault(address(vault5), true);

@@ -5,6 +5,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ILendingMarket} from "./Interface/ILendingMarket.sol";
 
@@ -29,6 +30,8 @@ import {ILendingMarket} from "./Interface/ILendingMarket.sol";
  *  • Sentinel can only REDUCE risk — cannot add markets or move funds out
  */
 contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     // ── Role constants ────────────────────────────────────────────────
     bytes32 public constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
     bytes32 public constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
@@ -40,6 +43,19 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
 
     // Fees
     uint256 public constant MAX_FEE_BPS = 2_000; // 20%
+
+    // Timelock bounds for risk-increasing curator actions
+    uint256 public constant MIN_TIMELOCK = 1 minutes;
+    uint256 public constant MAX_TIMELOCK = 3 weeks;
+    uint256 public timelock = 1 minutes; // testnet default; set 24h+ for production
+
+    // Timelock queue
+    struct Pending {
+        uint256 eta;
+        bool exists;
+    }
+
+    mapping(bytes32 => Pending) public pendingActions;
     uint256 public performanceFeeBps = 1_000; // 10%
     address public feeRecipient;
 
@@ -74,7 +90,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Maximum allowed drift from AI snapshot before staleness reject, in bps. Default 5%.
     uint256 public driftToleranceBps = 500;
     /// @notice Minimum time between rebalances. Default 1 hour.
-    uint256 public rebalanceEpochLength = 1 minutes;
+    uint256 public rebalanceEpochLength = 1 hours;
 
     // ── Phase 2: Epoch state ──────────────────────────────────────────────
     /// @notice Timestamp of the last successfully executed reallocate call.
@@ -113,6 +129,10 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     event Deallocated(address indexed market, uint256 amount);
     event MarketEnabled(address indexed market, uint256 cap);
     event CapUpdated(address indexed market, uint256 cap);
+    event MarketQueued(bytes32 indexed id, address indexed market, uint256 eta);
+    event CapQueued(bytes32 indexed id, address indexed market, uint256 cap, uint256 eta);
+    event ActionRevoked(bytes32 indexed id);
+    event TimelockUpdated(uint256 d);
     event DepositsToggled(bool paused, address by);
     event FeeMinted(address indexed to, uint256 shares, uint256 gain);
     event FeeUpdated(uint256 bps);
@@ -163,7 +183,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         shares = _toShares(assets);
         require(shares > 0, "zero shares");
         _mint(receiver, shares);
-        require(asset.transferFrom(msg.sender, address(this), assets), "transferFrom");
+        asset.safeTransferFrom(msg.sender, address(this), assets);
         _lastTA = totalAssets();
         emit Deposited(msg.sender, receiver, assets, shares);
     }
@@ -178,7 +198,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         _ensureLiquidity(assets);
         _burn(owner_, shares);
         _lastTA = totalAssets();
-        require(asset.transfer(receiver, assets), "transfer");
+        asset.safeTransfer(receiver, assets);
         emit Redeemed(msg.sender, receiver, owner_, assets, shares);
     }
 
@@ -255,10 +275,11 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     function allocate(address market, uint256 amount) external onlyRole(ALLOCATOR_ROLE) nonReentrant {
         MarketCfg storage cfg = markets[market];
         require(cfg.enabled, "market disabled");
+        require(!depositsPaused, "paused: no new allocation"); // I-9
         require(ILendingMarket(market).balanceOf(address(this)) + amount <= cfg.supplyCap, "cap exceeded");
         require(asset.balanceOf(address(this)) >= amount, "insufficient idle");
         // CEI: approve + supply (interaction), then check post-condition
-        asset.approve(market, amount);
+        asset.forceApprove(market, amount);
         ILendingMarket(market).supply(amount);
         // D-7 fix: enforce minimum idle buffer after allocation (I-3)
         // Skip when minIdleBufferBps == 0 (floor disabled) or totalAssets == 0
@@ -324,21 +345,45 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         }
 
         // ── Pre-compute sum of targets ────────────────────────────────
+        // Each market may appear once: a duplicate would be counted twice in
+        // the I-1 sum while only being moved once.
         uint256 targetSum;
         uint256 n = targets.length;
         for (uint256 i; i < n;) {
+            for (uint256 j; j < i;) {
+                if (targets[j].market == targets[i].market) {
+                    revert InvariantViolation(bytes32("I-1"));
+                }
+                unchecked {
+                    ++j;
+                }
+            }
             targetSum += targets[i].targetAmount;
             unchecked {
                 ++i;
             }
         }
 
+        // Enabled markets missing from `targets` keep their balances. Those
+        // balances are not idle, so they are reserved before deriving idle.
+        uint256 untouched;
+        uint256 mlen = _mlist.length;
+        for (uint256 k; k < mlen;) {
+            address m = _mlist[k];
+            if (markets[m].enabled && !_isListed(targets, m)) {
+                untouched += ILendingMarket(m).balanceOf(address(this));
+            }
+            unchecked {
+                ++k;
+            }
+        }
+
         // ── I-1 Conservation ─────────────────────────────────────────
-        // impliedIdle = ta - targetSum; must be >= 0 (plus 1-wei epsilon)
-        if (targetSum > ta + 1) {
+        // impliedIdle = ta - targetSum - untouched; must be >= 0 (plus 1-wei epsilon)
+        if (targetSum + untouched > ta + 1) {
             revert InvariantViolation(bytes32("I-1"));
         }
-        uint256 impliedIdle = ta >= targetSum ? ta - targetSum : 0;
+        uint256 impliedIdle = ta >= targetSum + untouched ? ta - targetSum - untouched : 0;
 
         // ── I-3 Idle floor ───────────────────────────────────────────
         if (minIdleBufferBps > 0 && ta > 0) {
@@ -418,7 +463,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
             uint256 cur = ILendingMarket(mkt).balanceOf(address(this));
             if (tgt > cur) {
                 uint256 toSupply = tgt - cur;
-                require(asset.approve(mkt, toSupply), "approve failed");
+                asset.forceApprove(mkt, toSupply);
                 ILendingMarket(mkt).supply(toSupply);
             }
             unchecked {
@@ -430,22 +475,74 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  CURATOR – MARKET MANAGEMENT
+    //  CURATOR – MARKET MANAGEMENT (timelocked)
     // ═══════════════════════════════════════════════════════════════
 
-    function addMarket(address market, uint256 cap) external onlyRole(CURATOR_ROLE) nonReentrant {
+    /// @notice Queue a market addition. Executable by anyone after `timelock`.
+    function submitAddMarket(address market, uint256 cap) external onlyRole(CURATOR_ROLE) {
         require(market != address(0) && cap > 0, "bad args");
         require(!markets[market].enabled, "already enabled");
+        bytes32 id = keccak256(abi.encodePacked("addMarket", market, cap));
+        require(!pendingActions[id].exists, "already queued");
+        uint256 eta = block.timestamp + timelock;
+        pendingActions[id] = Pending(eta, true);
+        emit MarketQueued(id, market, eta);
+    }
+
+    function executeAddMarket(address market, uint256 cap) external nonReentrant {
+        bytes32 id = keccak256(abi.encodePacked("addMarket", market, cap));
+        Pending storage p = pendingActions[id];
+        require(p.exists, "no pending action");
+        require(block.timestamp >= p.eta, "timelock active");
+        // Two queued additions of one market (different caps) must not both
+        // execute: a duplicate _mlist entry would double-count totalAssets().
+        require(!markets[market].enabled, "already enabled");
+        delete pendingActions[id];
         markets[market] = MarketCfg(true, cap);
         _mlist.push(market);
         emit MarketEnabled(market, cap);
     }
 
+    /// @notice Cap decreases apply immediately (curator or sentinel).
+    ///         Cap increases are curator-only and go through the timelock.
     function setSupplyCap(address market, uint256 newCap) external {
         require(markets[market].enabled, "not enabled");
-        require(hasRole(CURATOR_ROLE, msg.sender) || hasRole(SENTINEL_ROLE, msg.sender), "unauthorized");
+        if (newCap > markets[market].supplyCap) {
+            require(hasRole(CURATOR_ROLE, msg.sender), "curator only");
+            bytes32 id = keccak256(abi.encodePacked("setCap", market, newCap));
+            require(!pendingActions[id].exists, "already queued");
+            uint256 eta = block.timestamp + timelock;
+            pendingActions[id] = Pending(eta, true);
+            emit CapQueued(id, market, newCap, eta);
+        } else {
+            require(hasRole(CURATOR_ROLE, msg.sender) || hasRole(SENTINEL_ROLE, msg.sender), "unauthorized");
+            markets[market].supplyCap = newCap;
+            emit CapUpdated(market, newCap);
+        }
+    }
+
+    function executeSetCap(address market, uint256 newCap) external nonReentrant {
+        bytes32 id = keccak256(abi.encodePacked("setCap", market, newCap));
+        Pending storage p = pendingActions[id];
+        require(p.exists && block.timestamp >= p.eta, "timelock active");
+        require(markets[market].enabled, "not enabled");
+        delete pendingActions[id];
         markets[market].supplyCap = newCap;
         emit CapUpdated(market, newCap);
+    }
+
+    /// @notice Cancel a queued action. Risk-reducing, so curator or sentinel.
+    function revokeAction(bytes32 id) external {
+        require(hasRole(SENTINEL_ROLE, msg.sender) || hasRole(CURATOR_ROLE, msg.sender), "unauthorized");
+        require(pendingActions[id].exists, "no action");
+        delete pendingActions[id];
+        emit ActionRevoked(id);
+    }
+
+    function setTimelock(uint256 d) external onlyRole(CURATOR_ROLE) {
+        require(d >= MIN_TIMELOCK && d <= MAX_TIMELOCK, "bad delay");
+        timelock = d;
+        emit TimelockUpdated(d);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -457,7 +554,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         emit DepositsToggled(true, msg.sender);
     }
 
-    function unpauseDeposits() external {
+    function unpauseDeposits() external onlyRole(DEFAULT_ADMIN_ROLE) {
         depositsPaused = false;
         emit DepositsToggled(false, msg.sender);
     }
@@ -584,6 +681,17 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         return s * (totalAssets() + VASSETS) / (totalSupply() + VSHARES);
     }
 
+    function _isListed(MarketTarget[] calldata targets, address market) internal pure returns (bool) {
+        uint256 n = targets.length;
+        for (uint256 i; i < n;) {
+            if (targets[i].market == market) return true;
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
+    }
+
     function _ensureLiquidity(uint256 needed) internal {
         uint256 idle = asset.balanceOf(address(this));
         if (idle >= needed) return;
@@ -611,7 +719,7 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
             _lastTA = cur;
             return;
         }
-        uint256 gain = cur - _lastTA; // 10 usdc  10 * 10 / 100 = 1
+        uint256 gain = cur - _lastTA;
         uint256 feeA = gain * performanceFeeBps / 10_000;
         uint256 feeShares = feeA * (totalSupply() + VSHARES) / (cur + VASSETS);
         if (feeShares > 0) _mint(feeRecipient, feeShares);
@@ -619,6 +727,3 @@ contract CuratedVault is ERC20, AccessControl, ReentrancyGuard {
         _lastTA = cur;
     }
 }
-
-// -------- 5 usdt
-

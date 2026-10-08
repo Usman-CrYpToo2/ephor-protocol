@@ -31,7 +31,7 @@ contract VaultAccessControlTest is TestBase {
 
     function testVault_nonCuratorCannotAddMarket() public {
         vm.expectRevert();
-        vault.addMarket(address(0xCAFE), 1_000 * 1e6);
+        vault.submitAddMarket(address(0xCAFE), 1_000 * 1e6);
     }
 
     function testVault_curatorCanAddMarket() public {
@@ -39,7 +39,9 @@ contract VaultAccessControlTest is TestBase {
         vm.prank(admin);
         vault.grantRole(CURATOR_ROLE, address(this));
 
-        vault.addMarket(fake, 1_000 * 1e6);
+        vault.submitAddMarket(fake, 1_000 * 1e6);
+        vm.warp(block.timestamp + vault.timelock());
+        vault.executeAddMarket(fake, 1_000 * 1e6);
 
         (bool enabled,) = vault.markets(fake);
         assertTrue(enabled);
@@ -54,6 +56,12 @@ contract VaultAccessControlTest is TestBase {
         vault.pauseDeposits();
         assertTrue(vault.depositsPaused());
 
+        // The sentinel can pause but not unpause; only the admin can.
+        vm.expectRevert();
+        vault.unpauseDeposits();
+        assertTrue(vault.depositsPaused(), "still paused after failed unpause");
+
+        vm.prank(admin);
         vault.unpauseDeposits();
         assertFalse(vault.depositsPaused());
 

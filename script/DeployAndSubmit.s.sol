@@ -155,22 +155,22 @@ contract DeployAndSubmit is Script {
         console.log("Oracle wired");
 
         // ══════════════════════════════════════════════════════════════════════
-        // 8. Add markets to each vault (instant — no timelock)
+        // 8. Queue market additions (executed by ExecuteAndSeed after the timelock)
         // ══════════════════════════════════════════════════════════════════════
 
         // USDC: caps in 6-decimal units (50k USDC each)
-        vaultUSDC.addMarket(address(usdcA), 50_000 * 1e6);
-        vaultUSDC.addMarket(address(usdcB), 50_000 * 1e6);
+        vaultUSDC.submitAddMarket(address(usdcA), 50_000 * 1e6);
+        vaultUSDC.submitAddMarket(address(usdcB), 50_000 * 1e6);
 
         // WETH: caps in 18-decimal units (50 WETH each)
-        vaultWETH.addMarket(address(wethA), 50 * 1e18);
-        vaultWETH.addMarket(address(wethB), 50 * 1e18);
+        vaultWETH.submitAddMarket(address(wethA), 50 * 1e18);
+        vaultWETH.submitAddMarket(address(wethB), 50 * 1e18);
 
         // WBTC: caps in 8-decimal units (5 WBTC each)
-        vaultWBTC.addMarket(address(wbtcA), 5 * 1e8);
-        vaultWBTC.addMarket(address(wbtcB), 5 * 1e8);
+        vaultWBTC.submitAddMarket(address(wbtcA), 5 * 1e8);
+        vaultWBTC.submitAddMarket(address(wbtcB), 5 * 1e8);
 
-        console.log("Markets added to all vaults");
+        console.log("Market additions queued; execute after the vault timelock");
 
         // ══════════════════════════════════════════════════════════════════════
         // 9. Register all vaults in sentinel (autoPause = true)

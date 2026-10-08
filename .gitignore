@@ -1,25 +1,15 @@
-# Foundry compiler output
+# Foundry
 cache/
 out/
-
-# Broadcast logs
 broadcast/
+foundry.lock
 
-# Claude Code — ignore local settings, track project commands and specs
-.claude/settings.local.json
-.claude/plan/
-.claude/specs/
-.claude/worktrees/
-
-# Docs
-docs/
-
-# Environment / secrets
+# Environment
 .env
 .env.*
 !.env.example
 
-# Frontend dependencies & build output
+# Frontend
 frontend/node_modules/
 frontend/dist/
 frontend/.env
@@ -27,53 +17,20 @@ frontend/.env.*
 !frontend/.env.example
 frontend/.netlify/
 
-# OS / editor noise
+# Local agent configuration
+.claude/
+CLAUDE.md
+
+# Local scratch
+*.png
+*.jpg
+*.jpeg
+*.docx
+*.pptx
+
+# OS / editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 *.swp
-*.swo
-
-# Foundry lock (generated, not needed in VCS)
-foundry.lock
-
-# Analysis / audit scratch files
-explanation.md
-store.md
-SECURITY_AUDIT_REPORT.md
-vulnerability_summary.md
-
-# Submission document generator scripts and output
-make_docx.py
-make_pptx.py
-EphorProtocol.docx
-EphorProtocol.pptx
-projectdescription.txt
-scriptvideo.md
-
-# Session scratch notes (working docs, not protocol)
-newchanges.md
-timelock.md
-frontend.md
-
-# Screenshots and session images dropped at repo root
-*.png
-*.jpg
-*.jpeg
-
-# Auto-added by /commit — runtime output & scratch files
-history.txt
-submission.txt
-
-# Debug / one-off Foundry scripts (not part of deployment flow)
-script/Test*.s.sol
-script/Trigger*.s.sol
-script/Verify*.s.sol
-script/UpdateCaps.s.sol
-
-# Claude Code skill packages (generated binary archives)
-*.skill
-
-# Claude Code agent runtime memory (ephemeral agent state)
-.claude/agent-memory/

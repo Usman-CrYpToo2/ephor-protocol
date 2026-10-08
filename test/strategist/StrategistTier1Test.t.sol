@@ -125,6 +125,21 @@ contract StrategistTier1Test is TestBase {
 
     /// @notice BALANCED label triggers reallocate with equal weights across markets.
     ///         Both markets should receive a nonzero allocation. Proves I-1, I-3.
+    /// @notice A response below the consensus threshold must not move funds.
+    function testHandleResponse_belowThresholdSkipped() public {
+        uint256 reqId = _requestRebalance();
+        uint256 epochBefore = vault.currentEpoch();
+
+        vm.expectEmit(true, false, false, true);
+        emit RebalanceSkipped(address(vault), "CONSENSUS_NOT_MET");
+        platform.simulateBelowThreshold(reqId, "YIELD_TILT");
+
+        assertEq(vault.currentEpoch(), epochBefore, "no reallocation");
+        assertEq(marketA.balanceOf(address(vault)), 0, "market A untouched");
+        assertEq(marketB.balanceOf(address(vault)), 0, "market B untouched");
+        assertEq(strategist.activeRequest(address(vault)), 0, "activeRequest cleared");
+    }
+
     function testHandleResponse_BALANCED() public {
         uint256 reqId = _requestRebalance();
         uint256 epochBefore = vault.currentEpoch();

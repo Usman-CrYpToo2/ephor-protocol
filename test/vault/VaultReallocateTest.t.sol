@@ -188,6 +188,35 @@ contract VaultReallocateTest is TestBase {
         vault.reallocate(_targets2(address(marketA), aAmt, address(marketB), bAmt), guard);
     }
 
+    /// @notice A market left out of `targets` keeps its balance. That balance
+    ///         is not idle, so it must not count toward the I-3 floor.
+    function testReallocate_I3_unlistedMarketIsNotIdle() public {
+        vm.prank(curator);
+        vault.setMinIdleBufferBps(2_000);
+        uint256 ta = vault.totalAssets();
+
+        // Step 1: A = 45%, B = 35%, idle = 20% (exactly the floor).
+        CuratedVault.RebalanceGuard memory first = _makeGuard();
+        vm.prank(allocator);
+        vault.reallocate(_targets2(address(marketA), ta * 45 / 100, address(marketB), ta * 35 / 100), first);
+        _warpPastEpoch();
+
+        // Step 2: list only B at 45%. A keeps 45%, so real idle would be 10%.
+        CuratedVault.RebalanceGuard memory guard = _makeGuard();
+        vm.expectRevert(abi.encodeWithSelector(CuratedVault.InvariantViolation.selector, bytes32("I-3")));
+        vm.prank(allocator);
+        vault.reallocate(_target(address(marketB), ta * 45 / 100), guard);
+    }
+
+    /// @notice Listing a market twice would double-count it in the I-1 sum.
+    function testReallocate_I1_duplicateMarketRejected() public {
+        uint256 ta = vault.totalAssets();
+        CuratedVault.RebalanceGuard memory guard = _makeGuard();
+        vm.expectRevert(abi.encodeWithSelector(CuratedVault.InvariantViolation.selector, bytes32("I-1")));
+        vm.prank(allocator);
+        vault.reallocate(_targets2(address(marketA), ta * 20 / 100, address(marketA), ta * 20 / 100), guard);
+    }
+
     // ════════════════════════════════════════════════════════════════
     //  I-4  MAX CONCENTRATION
     // ════════════════════════════════════════════════════════════════
